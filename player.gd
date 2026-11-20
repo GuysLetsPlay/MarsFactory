@@ -13,6 +13,7 @@ var is_local_player := false
 var belt_mode := false
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	is_local_player = is_multiplayer_authority()
 	var capsule := CollisionShape3D.new()
 	var shape := CapsuleShape3D.new()
@@ -47,8 +48,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		rotate_y(-event.relative.x * MOUSE_SENSITIVITY)
 		pitch = clampf(pitch - event.relative.y * MOUSE_SENSITIVITY, deg_to_rad(-82), deg_to_rad(82))
 		camera.rotation.x = pitch
-	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		get_parent().toggle_pause_menu()
+		get_viewport().set_input_as_handled()
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		if belt_mode:
 			_place_belt()
@@ -78,6 +80,8 @@ func _place_belt() -> void:
 		get_parent().add_conveyor(hit["position"], rotation.y)
 
 func _physics_process(delta: float) -> void:
+	if get_tree().paused:
+		return
 	if not is_local_player:
 		global_position = global_position.lerp(remote_target_position, min(delta * 12.0, 1.0))
 		rotation.y = lerp_angle(rotation.y, remote_target_rotation.y, min(delta * 12.0, 1.0))

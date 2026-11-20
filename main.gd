@@ -13,11 +13,14 @@ var machine_timer := 0.0
 var balance_label: Label
 var production_label: Label
 var settings_panel: PanelContainer
+var pause_overlay: ColorRect
+var pause_panel: PanelContainer
 var remap_action := ""
 var restoring_save := false
 var key_labels := {"move_forward": "W", "move_back": "S", "move_left": "A", "move_right": "D", "jump": "Space"}
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	_setup_inputs()
 	_build_world()
 	multiplayer.peer_connected.connect(_on_peer_connected)
@@ -28,9 +31,12 @@ func _ready() -> void:
 	_spawn_player(multiplayer.get_unique_id())
 	_build_hud()
 	_build_network_menu()
+	_build_pause_menu()
 	_update_economy_ui()
 
 func _process(delta: float) -> void:
+	if get_tree().paused:
+		return
 	machine_timer += delta
 	if machine_timer >= 1.0:
 		machine_timer -= 1.0
@@ -375,9 +381,14 @@ func _update_economy_ui() -> void:
 
 func _build_settings(layer: CanvasLayer) -> void:
 	settings_panel = PanelContainer.new()
-	settings_panel.position = Vector2(280, 112)
-	settings_panel.custom_minimum_size = Vector2(320, 300)
+	settings_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	settings_panel.offset_left = -230
+	settings_panel.offset_top = -210
+	settings_panel.offset_right = 230
+	settings_panel.offset_bottom = 210
 	settings_panel.visible = false
+	settings_panel.process_mode = Node.PROCESS_MODE_ALWAYS
+	settings_panel.add_theme_stylebox_override("panel", _menu_style(Color(0.055, 0.085, 0.12, 0.98), Color(0.24, 0.72, 0.82)))
 	layer.add_child(settings_panel)
 	var column := VBoxContainer.new()
 	settings_panel.add_child(column)
@@ -402,9 +413,110 @@ func _build_settings(layer: CanvasLayer) -> void:
 	close_button.pressed.connect(_toggle_settings)
 	column.add_child(close_button)
 
+func _menu_style(fill: Color, border: Color) -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+	style.bg_color = fill
+	style.border_color = border
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(14)
+	style.content_margin_left = 24
+	style.content_margin_right = 24
+	style.content_margin_top = 20
+	style.content_margin_bottom = 20
+	return style
+
+func _build_pause_menu() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 20
+	add_child(layer)
+	pause_overlay = ColorRect.new()
+	pause_overlay.color = Color(0.015, 0.035, 0.055, 0.78)
+	pause_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	pause_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	pause_overlay.visible = false
+	pause_overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	layer.add_child(pause_overlay)
+	pause_panel = PanelContainer.new()
+	pause_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	pause_panel.offset_left = -250
+	pause_panel.offset_top = -235
+	pause_panel.offset_right = 250
+	pause_panel.offset_bottom = 235
+	pause_panel.add_theme_stylebox_override("panel", _menu_style(Color(0.045, 0.075, 0.105, 0.99), Color(0.91, 0.43, 0.22)))
+	pause_overlay.add_child(pause_panel)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 12)
+	pause_panel.add_child(column)
+	var eyebrow := Label.new()
+	eyebrow.text = "MARS OUTPOST  /  SECTOR 01"
+	eyebrow.add_theme_color_override("font_color", Color(0.39, 0.78, 0.83))
+	eyebrow.add_theme_font_size_override("font_size", 14)
+	column.add_child(eyebrow)
+	var heading := Label.new()
+	heading.text = "PAUSE"
+	heading.add_theme_color_override("font_color", Color(1.0, 0.89, 0.75))
+	heading.add_theme_font_size_override("font_size", 34)
+	column.add_child(heading)
+	var divider := HSeparator.new()
+	column.add_child(divider)
+	_add_menu_button(column, "Weiter zum Aussenposten", _resume_game, true)
+	_add_menu_button(column, "Einstellungen & Steuerung", _open_settings, false)
+	_add_menu_button(column, "Spiel speichern", save_game, false)
+	_add_menu_button(column, "Spiel laden", load_game, false)
+	var footer := Label.new()
+	footer.text = "ESC  ·  Menue schliessen"
+	footer.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	footer.add_theme_color_override("font_color", Color(0.55, 0.64, 0.69))
+	column.add_child(footer)
+
+func _add_menu_button(parent: VBoxContainer, caption: String, action: Callable, primary: bool) -> void:
+	var button := Button.new()
+	button.text = caption
+	button.custom_minimum_size = Vector2(0, 48)
+	button.focus_mode = Control.FOCUS_ALL
+	button.add_theme_font_size_override("font_size", 17)
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0.09, 0.43, 0.50) if primary else Color(0.10, 0.15, 0.19)
+	normal.border_color = Color(0.20, 0.74, 0.81) if primary else Color(0.22, 0.31, 0.36)
+	normal.set_border_width_all(1)
+	normal.set_corner_radius_all(8)
+	button.add_theme_stylebox_override("normal", normal)
+	var hover := normal.duplicate() as StyleBoxFlat
+	hover.bg_color = Color(0.13, 0.56, 0.63) if primary else Color(0.16, 0.25, 0.30)
+	button.add_theme_stylebox_override("hover", hover)
+	button.add_theme_stylebox_override("pressed", hover)
+	button.pressed.connect(action)
+	parent.add_child(button)
+
+func toggle_pause_menu() -> void:
+	if settings_panel.visible:
+		settings_panel.visible = false
+		pause_overlay.visible = true
+		return
+	var opening := not pause_overlay.visible
+	pause_overlay.visible = opening
+	get_tree().paused = opening
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if opening else Input.MOUSE_MODE_CAPTURED
+	if opening:
+		pause_panel.get_child(0).get_child(3).grab_focus()
+
+func _resume_game() -> void:
+	pause_overlay.visible = false
+	settings_panel.visible = false
+	get_tree().paused = false
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func _open_settings() -> void:
+	pause_overlay.visible = false
+	settings_panel.visible = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
 func _toggle_settings() -> void:
-	settings_panel.visible = not settings_panel.visible
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if settings_panel.visible else Input.MOUSE_MODE_CAPTURED
+	if settings_panel.visible:
+		settings_panel.visible = false
+		pause_overlay.visible = true
+	else:
+		_open_settings()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if remap_action != "" and event is InputEventKey and event.pressed:
