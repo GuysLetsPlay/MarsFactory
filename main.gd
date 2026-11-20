@@ -1290,7 +1290,7 @@ func _update_build_preview() -> void:
 			if is_instance_valid(preview_branch_source):
 				var source_direction := (preview_branch_source.get_meta("direction") as Vector3).normalized()
 				var side := source_direction.rotated(Vector3.UP, PI * 0.5)
-				var player_forward := -player.camera.global_transform.basis.z
+				var player_forward: Vector3 = -player.camera.global_transform.basis.z
 				var branch_direction := side if player_forward.dot(side) >= player_forward.dot(-side) else -side
 				preview_yaw = atan2(-branch_direction.x, -branch_direction.z)
 			else:
