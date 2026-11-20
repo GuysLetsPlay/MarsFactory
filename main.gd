@@ -724,8 +724,24 @@ func _build_machine_model(parent: Node3D, kind: String) -> void:
 		_add_machine_box(parent, Vector3(0, 0.72, 0), Vector3(1.28, 0.14, 1.15), shell_color)
 		_add_machine_box(parent, Vector3(0, -0.36, -0.92), Vector3(0.92, 0.28, 0.62), dark)
 		_add_machine_box(parent, Vector3(0, -0.55, -1.12), Vector3(0.74, 0.12, 0.30), Color(0.93, 0.58, 0.17))
+		_add_machine_box(parent, Vector3(0, -0.34, 1.00), Vector3(0.72, 0.34, 0.10), Color(0.77, 0.34, 0.14))
+		_add_port_label(parent, "IN", Vector3(0, -0.34, 1.06), Color(1.0, 0.79, 0.53), true)
+		_add_machine_box(parent, Vector3(0, -0.34, -1.00), Vector3(0.72, 0.34, 0.10), Color(0.09, 0.43, 0.49))
+		_add_port_label(parent, "OUT", Vector3(0, -0.34, -1.06), Color(0.65, 0.98, 0.94), false)
 	for i in range(4):
 		_add_machine_box(parent, Vector3(-0.60 + i * 0.4, -0.48, 0.797), Vector3(0.18, 0.07, 0.035), Color(0.96, 0.70, 0.19))
+
+func _add_port_label(parent: Node3D, caption: String, pos: Vector3, color: Color, faces_positive_z: bool) -> void:
+	var label := Label3D.new()
+	label.text = caption
+	label.position = pos
+	label.rotation.y = PI if faces_positive_z else 0.0
+	label.font_size = 64
+	label.pixel_size = 0.0045
+	label.modulate = color
+	label.outline_size = 8
+	label.outline_modulate = Color(0.025, 0.045, 0.055)
+	parent.add_child(label)
 
 func _add_machine_box(parent: Node3D, pos: Vector3, size: Vector3, color: Color, override_material: Material = null) -> void:
 	var detail := MeshInstance3D.new()
