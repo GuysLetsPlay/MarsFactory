@@ -21,6 +21,10 @@ var network_overlay: ColorRect
 var hud_status: Label
 var remap_action := ""
 var restoring_save := false
+var build_preview: MeshInstance3D
+var preview_valid := false
+var preview_position := Vector3.ZERO
+var preview_yaw := 0.0
 var key_labels := {"move_forward": "W", "move_back": "S", "move_left": "A", "move_right": "D", "jump": "Space"}
 
 func _ready() -> void:
@@ -42,6 +46,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if get_tree().paused:
 		return
+	_update_build_preview()
 	machine_timer += delta
 	if machine_timer >= 1.0:
 		machine_timer -= 1.0
@@ -200,6 +205,11 @@ func add_conveyor(pos: Vector3, yaw: float) -> void:
 		roller.position = Vector3(0, 0.12, z)
 		roller.material_override = steel
 		belt.add_child(roller)
+	var collision := CollisionShape3D.new()
+	var belt_shape := BoxShape3D.new()
+	belt_shape.size = Vector3(1.0, 0.16, 2.4)
+	collision.shape = belt_shape
+	belt.add_child(collision)
 	add_child(belt)
 	_update_economy_ui()
 
@@ -441,11 +451,14 @@ func _select_building(kind: String) -> void:
 	selected_building = kind
 	build_overlay.visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_create_build_preview()
 	if hud_status:
 		hud_status.text = "%s selected - click ground to place." % kind
 
 func _close_build_menu() -> void:
 	build_overlay.visible = false
+	selected_building = ""
+	_clear_build_preview()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func toggle_build_menu() -> void:
@@ -453,9 +466,76 @@ func toggle_build_menu() -> void:
 		return
 	build_overlay.visible = not build_overlay.visible
 	selected_building = ""
+	_clear_build_preview()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if build_overlay.visible else Input.MOUSE_MODE_CAPTURED
 	if build_overlay.visible:
 		build_panel.get_child(0).get_child(3).grab_focus()
+
+func _create_build_preview() -> void:
+	_clear_build_preview()
+	build_preview = MeshInstance3D.new()
+	if selected_building == "Foerderband":
+		var belt_mesh := BoxMesh.new()
+		belt_mesh.size = Vector3(1.0, 0.16, 2.4)
+		build_preview.mesh = belt_mesh
+	else:
+		var machine_mesh := BoxMesh.new()
+		machine_mesh.size = Vector3(2.0, 2.0, 2.0)
+		build_preview.mesh = machine_mesh
+	var ghost_material := StandardMaterial3D.new()
+	ghost_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	ghost_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	ghost_material.albedo_color = Color(0.25, 1.0, 0.48, 0.42)
+	build_preview.material_override = ghost_material
+	add_child(build_preview)
+	build_preview.visible = false
+
+func _clear_build_preview() -> void:
+	if is_instance_valid(build_preview):
+		build_preview.queue_free()
+	build_preview = null
+	preview_valid = false
+
+func _update_build_preview() -> void:
+	if selected_building == "" or not is_instance_valid(build_preview):
+		return
+	var player = players.get(multiplayer.get_unique_id())
+	if player == null or player.camera == null:
+		build_preview.visible = false
+		return
+	var origin: Vector3 = player.camera.global_position
+	var end: Vector3 = origin + -player.camera.global_transform.basis.z * 12.0
+	var ray := PhysicsRayQueryParameters3D.create(origin, end)
+	ray.exclude = [player]
+	var hit := get_world_3d().direct_space_state.intersect_ray(ray)
+	if not hit.has("position"):
+		build_preview.visible = false
+		preview_valid = false
+		return
+	var ground_point: Vector3 = hit["position"]
+	preview_yaw = player.rotation.y
+	if selected_building == "Foerderband":
+		preview_position = Vector3(round(ground_point.x), 0.15, round(ground_point.z))
+		build_preview.position = preview_position
+		build_preview.rotation.y = preview_yaw
+	else:
+		preview_position = Vector3(round(ground_point.x / 2.0) * 2.0, 1.0, round(ground_point.z / 2.0) * 2.0)
+		build_preview.position = preview_position
+		build_preview.rotation = Vector3.ZERO
+	var shape := BoxShape3D.new()
+	var clearance := Vector3(1.8, 0.14, 2.2) if selected_building == "Foerderband" else Vector3(1.8, 1.8, 1.8)
+	shape.size = clearance
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = shape
+	query.transform = Transform3D(Basis.IDENTITY, preview_position + Vector3(0, 0.12, 0) if selected_building == "Foerderband" else preview_position)
+	query.exclude = [player.get_rid()]
+	query.collide_with_areas = false
+	var overlaps := get_world_3d().direct_space_state.intersect_shape(query, 8)
+	var cost := 10 if selected_building == "Foerderband" else (150 if selected_building == "Staubfoerderer" else 250)
+	preview_valid = overlaps.is_empty() and money >= cost
+	var ghost_material := build_preview.material_override as StandardMaterial3D
+	ghost_material.albedo_color = Color(0.25, 1.0, 0.48, 0.42) if preview_valid else Color(1.0, 0.22, 0.18, 0.48)
+	build_preview.visible = true
 func _update_economy_ui() -> void:
 	if is_instance_valid(balance_label):
 		balance_label.text = "Kontostand: %d cr" % money
@@ -576,6 +656,7 @@ func toggle_pause_menu() -> void:
 	build_overlay.visible = false
 	network_overlay.visible = false
 	selected_building = ""
+	_clear_build_preview()
 	if settings_panel.visible:
 		settings_panel.visible = false
 		pause_overlay.visible = true
@@ -621,19 +702,17 @@ func _unhandled_input(event: InputEvent) -> void:
 		remap_action = ""
 		return
 	if selected_building != "" and event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		var player = players.get(multiplayer.get_unique_id())
-		if player and player.camera:
-			var origin: Vector3 = player.camera.global_position
-			var end: Vector3 = origin + -player.camera.global_transform.basis.z * 12.0
-			var query := PhysicsRayQueryParameters3D.create(origin, end)
-			query.exclude = [player]
-			var hit := get_world_3d().direct_space_state.intersect_ray(query)
-			if hit.has("position"):
-				if selected_building == "Foerderband":
-					add_conveyor(hit["position"], player.rotation.y)
-					selected_building = ""
-				else:
-					place_building(selected_building, hit["position"])
+		if preview_valid:
+			if selected_building == "Foerderband":
+				add_conveyor(preview_position, preview_yaw)
+			else:
+				place_building(selected_building, preview_position)
+			if hud_status:
+				hud_status.text = "Placed %s." % selected_building
+			selected_building = ""
+			_clear_build_preview()
+		else:
+			_update_status("Invalid placement: surface is blocked or balance is too low.")
 
 func save_game() -> void:
 	var data := {"money": money, "dust": dust, "compacted_dust": compacted_dust, "buildings": []}
