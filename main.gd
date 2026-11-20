@@ -15,6 +15,10 @@ var production_label: Label
 var settings_panel: PanelContainer
 var pause_overlay: ColorRect
 var pause_panel: PanelContainer
+var build_overlay: ColorRect
+var build_panel: PanelContainer
+var network_overlay: ColorRect
+var hud_status: Label
 var remap_action := ""
 var restoring_save := false
 var key_labels := {"move_forward": "W", "move_back": "S", "move_left": "A", "move_right": "D", "jump": "Space"}
@@ -30,6 +34,7 @@ func _ready() -> void:
 	multiplayer.server_disconnected.connect(_on_server_disconnected)
 	_spawn_player(multiplayer.get_unique_id())
 	_build_hud()
+	_build_build_menu()
 	_build_network_menu()
 	_build_pause_menu()
 	_update_economy_ui()
@@ -167,6 +172,10 @@ func _build_player() -> void:
 	_build_network_menu()
 
 func add_conveyor(pos: Vector3, yaw: float) -> void:
+	if money < 10:
+		_update_status("Nicht genug Geld fuer ein Foerderband (10 cr).")
+		return
+	money -= 10
 	var belt := Node3D.new()
 	belt.name = "ConveyorSegment"
 	belt.position = Vector3(round(pos.x), 0.15, round(pos.z))
@@ -192,6 +201,7 @@ func add_conveyor(pos: Vector3, yaw: float) -> void:
 		roller.material_override = steel
 		belt.add_child(roller)
 	add_child(belt)
+	_update_economy_ui()
 
 func place_building(kind: String, pos: Vector3) -> void:
 	var cost := 150 if kind == "Staubförderer" else 250
@@ -292,87 +302,160 @@ func _join_game(address: String) -> void:
 func _update_status(message: String) -> void:
 	if is_instance_valid(status_label):
 		status_label.text = message
+	if is_instance_valid(hud_status):
+		hud_status.text = message
 
 func _build_network_menu() -> void:
 	var layer := CanvasLayer.new()
+	layer.layer = 25
 	add_child(layer)
+	network_overlay = ColorRect.new()
+	network_overlay.color = Color(0.015, 0.035, 0.055, 0.82)
+	network_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	network_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	network_overlay.visible = false
+	network_overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	layer.add_child(network_overlay)
 	var panel := PanelContainer.new()
-	panel.position = Vector2(24, 100)
-	panel.custom_minimum_size = Vector2(300, 190)
-	layer.add_child(panel)
+	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	panel.offset_left = -240
+	panel.offset_top = -185
+	panel.offset_right = 240
+	panel.offset_bottom = 185
+	panel.add_theme_stylebox_override("panel", _menu_style(Color(0.045, 0.075, 0.105, 0.99), Color(0.25, 0.74, 0.82)))
+	network_overlay.add_child(panel)
 	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 8)
+	column.add_theme_constant_override("separation", 10)
 	panel.add_child(column)
 	var heading := Label.new()
-	heading.text = "MULTIPLAYER · bis zu 8 Spieler"
+	heading.text = "MULTIPLAYER SESSION"
+	heading.add_theme_font_size_override("font_size", 26)
 	column.add_child(heading)
 	var host_button := Button.new()
-	host_button.text = "Sitzung hosten"
+	host_button.text = "Host a session"
 	host_button.pressed.connect(_host_game)
 	column.add_child(host_button)
 	var address := LineEdit.new()
-	address.placeholder_text = "Host-IP, z. B. 192.168.1.20"
+	address.placeholder_text = "Host IP address"
 	address.text = "127.0.0.1"
 	column.add_child(address)
 	var join_button := Button.new()
-	join_button.text = "Beitreten"
+	join_button.text = "Join session"
 	join_button.pressed.connect(func(): _join_game(address.text))
 	column.add_child(join_button)
 	status_label = Label.new()
-	status_label.text = "Lokal solo. Host starten oder IP eingeben."
+	status_label.text = "Up to 8 players"
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	column.add_child(status_label)
+	var back := Button.new()
+	back.text = "Back to pause menu"
+	back.pressed.connect(func(): network_overlay.visible = false; pause_overlay.visible = true)
+	column.add_child(back)
 
+func _open_network_menu() -> void:
+	pause_overlay.visible = false
+	network_overlay.visible = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 func _build_hud() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
 	var title := Label.new()
-	title.text = "UPDATE 9 · STAUBFABRIK"
+	title.text = "UPDATE 9  /  DUST FACTORY"
 	title.position = Vector2(24, 20)
 	title.add_theme_font_size_override("font_size", 20)
 	title.add_theme_color_override("font_color", Color(1.0, 0.78, 0.59))
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(title)
 	var hint := Label.new()
-	hint.text = "WASD bewegen · Space springen · E abbauen · Baumenü links · ESC Maus fangen/freigeben"
-	hint.position = Vector2(24, 58)
-	hint.add_theme_font_size_override("font_size", 16)
-	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.88))
+	hint.text = "WASD move  |  E mine  |  B build menu  |  ESC pause"
+	hint.position = Vector2(24, 55)
+	hint.add_theme_font_size_override("font_size", 15)
+	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(hint)
+	balance_label = Label.new()
+	balance_label.position = Vector2(24, 84)
+	balance_label.add_theme_font_size_override("font_size", 18)
+	balance_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(balance_label)
+	production_label = Label.new()
+	production_label.position = Vector2(24, 110)
+	production_label.add_theme_font_size_override("font_size", 16)
+	production_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(production_label)
+	hud_status = Label.new()
+	hud_status.position = Vector2(24, 142)
+	hud_status.add_theme_font_size_override("font_size", 16)
+	hud_status.add_theme_color_override("font_color", Color(0.55, 0.88, 0.90))
+	hud_status.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(hud_status)
 	var cross := Label.new()
 	cross.text = "+"
 	cross.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
 	cross.position = Vector2(-7, -15)
 	cross.add_theme_font_size_override("font_size", 26)
 	cross.add_theme_color_override("font_color", Color(1, 0.86, 0.7, 0.8))
+	cross.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(cross)
-	var panel := PanelContainer.new()
-	panel.position = Vector2(24, 112)
-	panel.custom_minimum_size = Vector2(230, 200)
-	layer.add_child(panel)
-	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 5)
-	panel.add_child(column)
-	var heading := Label.new()
-	heading.text = "GEBÄUDE"
-	column.add_child(heading)
-	var extractor := Button.new()
-	extractor.text = "Staubförderer · 150 cr"
-	extractor.pressed.connect(func(): selected_building = "Staubförderer"; _update_status("Staubförderer gewählt: auf den Boden klicken zum Platzieren."))
-	column.add_child(extractor)
-	var press := Button.new()
-	press.text = "Staubpresse · 250 cr"
-	press.pressed.connect(func(): selected_building = "Staubpresse"; _update_status("Staubpresse gewählt: auf den Boden klicken zum Platzieren."))
-	column.add_child(press)
-	balance_label = Label.new()
-	column.add_child(balance_label)
-	production_label = Label.new()
-	column.add_child(production_label)
-	var settings_button := Button.new()
-	settings_button.text = "Einstellungen / Speichern"
-	settings_button.pressed.connect(_toggle_settings)
-	column.add_child(settings_button)
 	_build_settings(layer)
 
+func _build_build_menu() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 15
+	add_child(layer)
+	build_overlay = ColorRect.new()
+	build_overlay.color = Color(0.015, 0.035, 0.055, 0.78)
+	build_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	build_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	build_overlay.visible = false
+	layer.add_child(build_overlay)
+	build_panel = PanelContainer.new()
+	build_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	build_panel.offset_left = -270
+	build_panel.offset_top = -235
+	build_panel.offset_right = 270
+	build_panel.offset_bottom = 235
+	build_panel.add_theme_stylebox_override("panel", _menu_style(Color(0.045, 0.075, 0.105, 0.99), Color(0.25, 0.74, 0.82)))
+	build_overlay.add_child(build_panel)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 11)
+	build_panel.add_child(column)
+	var overline := Label.new()
+	overline.text = "MARS INDUSTRIES  /  CONSTRUCTION"
+	overline.add_theme_color_override("font_color", Color(0.39, 0.78, 0.83))
+	column.add_child(overline)
+	var heading := Label.new()
+	heading.text = "Build menu"
+	heading.add_theme_font_size_override("font_size", 30)
+	heading.add_theme_color_override("font_color", Color(1.0, 0.89, 0.75))
+	column.add_child(heading)
+	var desc := Label.new()
+	desc.text = "Choose a building, then click the ground to place it."
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	column.add_child(desc)
+	_add_menu_button(column, "Dust extractor  |  150 cr", func(): _select_building("Staubfoerderer"), true)
+	_add_menu_button(column, "Dust press  |  250 cr", func(): _select_building("Staubpresse"), false)
+	_add_menu_button(column, "Conveyor  |  10 cr", func(): _select_building("Foerderband"), false)
+	_add_menu_button(column, "Close  |  B / ESC", _close_build_menu, false)
+
+func _select_building(kind: String) -> void:
+	selected_building = kind
+	build_overlay.visible = false
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	if hud_status:
+		hud_status.text = "%s selected - click ground to place." % kind
+
+func _close_build_menu() -> void:
+	build_overlay.visible = false
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func toggle_build_menu() -> void:
+	if get_tree().paused or pause_overlay.visible:
+		return
+	build_overlay.visible = not build_overlay.visible
+	selected_building = ""
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if build_overlay.visible else Input.MOUSE_MODE_CAPTURED
+	if build_overlay.visible:
+		build_panel.get_child(0).get_child(3).grab_focus()
 func _update_economy_ui() -> void:
 	if is_instance_valid(balance_label):
 		balance_label.text = "Kontostand: %d cr" % money
@@ -461,6 +544,7 @@ func _build_pause_menu() -> void:
 	column.add_child(divider)
 	_add_menu_button(column, "Weiter zum Aussenposten", _resume_game, true)
 	_add_menu_button(column, "Einstellungen & Steuerung", _open_settings, false)
+	_add_menu_button(column, "Multiplayer", _open_network_menu, false)
 	_add_menu_button(column, "Spiel speichern", save_game, false)
 	_add_menu_button(column, "Spiel laden", load_game, false)
 	var footer := Label.new()
@@ -489,6 +573,9 @@ func _add_menu_button(parent: VBoxContainer, caption: String, action: Callable, 
 	parent.add_child(button)
 
 func toggle_pause_menu() -> void:
+	build_overlay.visible = false
+	network_overlay.visible = false
+	selected_building = ""
 	if settings_panel.visible:
 		settings_panel.visible = false
 		pause_overlay.visible = true
@@ -502,6 +589,8 @@ func toggle_pause_menu() -> void:
 
 func _resume_game() -> void:
 	pause_overlay.visible = false
+	network_overlay.visible = false
+	build_overlay.visible = false
 	settings_panel.visible = false
 	get_tree().paused = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -540,7 +629,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			query.exclude = [player]
 			var hit := get_world_3d().direct_space_state.intersect_ray(query)
 			if hit.has("position"):
-				place_building(selected_building, hit["position"])
+				if selected_building == "Foerderband":
+					add_conveyor(hit["position"], player.rotation.y)
+					selected_building = ""
+				else:
+					place_building(selected_building, hit["position"])
 
 func save_game() -> void:
 	var data := {"money": money, "dust": dust, "compacted_dust": compacted_dust, "buildings": []}

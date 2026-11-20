@@ -59,6 +59,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_E:
 			_mine_target()
+		elif event.keycode == KEY_B:
+			get_parent().toggle_build_menu()
+			get_viewport().set_input_as_handled()
 
 func _raycast_target() -> Dictionary:
 	var origin := camera.global_position
