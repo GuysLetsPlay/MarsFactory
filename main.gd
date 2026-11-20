@@ -39,6 +39,7 @@ var hud_status: Label
 var remap_action := ""
 var restoring_save := false
 var build_preview: MeshInstance3D
+var preview_route_segments: Array[MeshInstance3D] = []
 var preview_valid := false
 var preview_position := Vector3.ZERO
 var preview_yaw := 0.0
@@ -461,7 +462,7 @@ func _snap_conveyor_point(raw_point: Vector3, is_start: bool) -> Vector3:
 func _find_branch_attachment(raw_point: Vector3) -> Dictionary:
 	var best_belt: Node3D = null
 	var best_anchor := Vector3.ZERO
-	var best_distance := 0.65
+	var best_distance := 0.4
 	for node in get_tree().get_nodes_in_group("conveyor_segments"):
 		var belt := node as Node3D
 		var direction := (belt.get_meta("direction") as Vector3).normalized()
@@ -518,6 +519,101 @@ func _straight_grid_endpoint(raw_point: Vector3) -> Vector3:
 	var distance := maxf(2.4, roundf(raw_offset.dot(direction) / 2.0) * 2.0)
 	return conveyor_start + direction * distance
 
+func _direction_for_conveyor_end(point: Vector3) -> Vector3:
+	for node in get_tree().get_nodes_in_group("dust_presses"):
+		if _press_intake(node).distance_to(point) < 0.35:
+			return Vector3(0, 0, -1)
+	for node in get_tree().get_nodes_in_group("sell_stations"):
+		if _spaceport_intake(node).distance_to(point) < 0.35:
+			return Vector3(0, 0, -1)
+	for node in get_tree().get_nodes_in_group("conveyor_segments"):
+		var belt := node as Node3D
+		if _belt_entry(belt).distance_to(point) < 0.35:
+			return (belt.get_meta("direction") as Vector3).normalized()
+	return Vector3.ZERO
+
+func _build_conveyor_route(start: Vector3, finish: Vector3, start_direction: Vector3, end_direction: Vector3) -> PackedVector3Array:
+	var route := PackedVector3Array()
+	route.append(start)
+	var chord := finish - start
+	chord.y = 0.0
+	var distance := chord.length()
+	if distance < 0.01:
+		return route
+	var chord_direction := chord.normalized()
+	var from_direction := start_direction
+	var to_direction := end_direction
+	from_direction.y = 0.0
+	to_direction.y = 0.0
+	if from_direction.length() < 0.5:
+		from_direction = chord_direction
+	else:
+		from_direction = from_direction.normalized()
+	if to_direction.length() < 0.5:
+		to_direction = chord_direction
+	else:
+		to_direction = to_direction.normalized()
+	if from_direction.dot(chord_direction) > 0.98 and to_direction.dot(chord_direction) > 0.98:
+		route.append(finish)
+		return route
+	var handle := minf(distance * 0.45, 5.0)
+	var control_a := start + from_direction * handle
+	var control_b := finish - to_direction * handle
+	var steps := maxi(4, ceili(distance / 0.8))
+	for step in range(1, steps + 1):
+		var t := float(step) / float(steps)
+		var inverse := 1.0 - t
+		var point := inverse * inverse * inverse * start + 3.0 * inverse * inverse * t * control_a + 3.0 * inverse * t * t * control_b + t * t * t * finish
+		route.append(point)
+	return route
+
+func _conveyor_route_length(route: PackedVector3Array) -> float:
+	var route_length := 0.0
+	for index in range(route.size() - 1):
+		route_length += route[index].distance_to(route[index + 1])
+	return route_length
+
+func _place_conveyor_route(route: PackedVector3Array) -> bool:
+	var route_length := _conveyor_route_length(route)
+	var cost := ceili(route_length / 2.4) * 10
+	if money < cost:
+		return false
+	money -= cost
+	for index in range(route.size() - 1):
+		var start := route[index]
+		var finish := route[index + 1]
+		var direction := finish - start
+		direction.y = 0.0
+		var length := direction.length()
+		if length < 0.01:
+			continue
+		var yaw := atan2(-direction.x, -direction.z)
+		var segment := add_conveyor((start + finish) * 0.5, yaw, length, true)
+		if segment == null:
+			return false
+	_update_economy_ui()
+	return true
+
+func _update_preview_route(route: PackedVector3Array) -> void:
+	if not is_instance_valid(build_preview):
+		return
+	build_preview.position = Vector3.ZERO
+	build_preview.rotation = Vector3.ZERO
+	build_preview.scale = Vector3.ONE
+	for index in range(preview_route_segments.size()):
+		var part := preview_route_segments[index]
+		if index >= route.size() - 1:
+			part.visible = false
+			continue
+		var start := route[index]
+		var finish := route[index + 1]
+		var delta := finish - start
+		delta.y = 0.0
+		part.visible = true
+		part.position = (start + finish) * 0.5 + Vector3(0, 0.12, 0)
+		part.rotation.y = atan2(-delta.x, -delta.z)
+		part.scale.z = maxf(delta.length(), 0.05)
+
 func _is_allowed_conveyor_overlap(collider: Object, start: Vector3, finish: Vector3) -> bool:
 	if not collider is Node:
 		return false
@@ -536,7 +632,7 @@ func _is_allowed_conveyor_overlap(collider: Object, start: Vector3, finish: Vect
 
 func _find_belt_at_entry(point: Vector3, excluded: Node = null) -> Node3D:
 	var closest: Node3D = null
-	var best_distance := 2.0
+	var best_distance := 0.3
 	for node in get_tree().get_nodes_in_group("conveyor_segments"):
 		if node == excluded or not is_instance_valid(node):
 			continue
@@ -549,7 +645,7 @@ func _find_belt_at_entry(point: Vector3, excluded: Node = null) -> Node3D:
 
 func _find_belt_exiting_at(point: Vector3, excluded: Node = null) -> Node3D:
 	var closest: Node3D = null
-	var best_distance := 2.0
+	var best_distance := 0.3
 	for node in get_tree().get_nodes_in_group("conveyor_segments"):
 		if node == excluded:
 			continue
@@ -1280,23 +1376,19 @@ func toggle_build_menu() -> void:
 	preview_start_direction = Vector3.ZERO
 	_clear_build_preview()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if build_overlay.visible else Input.MOUSE_MODE_CAPTURED
-	if build_overlay.visible:
-		build_panel.get_child(0).get_child(4).grab_focus()
 
 func _create_build_preview() -> void:
 	_clear_build_preview()
 	build_preview = MeshInstance3D.new()
 	if selected_building == "Foerderband":
-		var belt_mesh := BoxMesh.new()
-		belt_mesh.size = Vector3(1.0, 0.16, 2.4)
-		build_preview.mesh = belt_mesh
-		for x in [-0.48, 0.48]:
-			var rail := MeshInstance3D.new()
-			var rail_mesh := BoxMesh.new()
-			rail_mesh.size = Vector3(0.08, 0.26, 2.4)
-			rail.mesh = rail_mesh
-			rail.position = Vector3(x, 0.10, 0)
-			build_preview.add_child(rail)
+		build_preview.mesh = null
+		for index in range(64):
+			var preview_part := MeshInstance3D.new()
+			var part_mesh := BoxMesh.new()
+			part_mesh.size = Vector3(0.86, 0.14, 1.0)
+			preview_part.mesh = part_mesh
+			build_preview.add_child(preview_part)
+			preview_route_segments.append(preview_part)
 	else:
 		_build_machine_model(build_preview, selected_building)
 	add_child(build_preview)
@@ -1305,11 +1397,13 @@ func _create_build_preview() -> void:
 
 func _set_preview_tint(node: Node, tint: Color) -> void:
 	if node is MeshInstance3D:
-		var ghost := StandardMaterial3D.new()
-		ghost.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		ghost.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		var ghost := (node as MeshInstance3D).material_override as StandardMaterial3D
+		if ghost == null:
+			ghost = StandardMaterial3D.new()
+			ghost.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			ghost.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			(node as MeshInstance3D).material_override = ghost
 		ghost.albedo_color = tint
-		node.material_override = ghost
 	for child in node.get_children():
 		_set_preview_tint(child, tint)
 
@@ -1335,6 +1429,7 @@ func _clear_build_preview() -> void:
 	if is_instance_valid(build_preview):
 		build_preview.queue_free()
 	build_preview = null
+	preview_route_segments.clear()
 	preview_valid = false
 
 func _update_build_preview() -> void:
@@ -1361,8 +1456,6 @@ func _update_build_preview() -> void:
 		if conveyor_start_set:
 			if is_instance_valid(conveyor_branch_source):
 				preview_endpoint = _branch_endpoint(target)
-			elif conveyor_start_direction.length() > 0.5:
-				preview_endpoint = _straight_grid_endpoint(target)
 			else:
 				preview_endpoint = _snap_conveyor_point(target, false)
 			var delta := preview_endpoint - conveyor_start
@@ -1372,16 +1465,17 @@ func _update_build_preview() -> void:
 				build_preview.visible = false
 				preview_valid = false
 				return
-			preview_yaw = atan2(-delta.x, -delta.z)
+			var end_direction := Vector3.ZERO if is_instance_valid(conveyor_branch_source) else _direction_for_conveyor_end(preview_endpoint)
+			var route := PackedVector3Array([conveyor_start, preview_endpoint]) if is_instance_valid(conveyor_branch_source) else _build_conveyor_route(conveyor_start, preview_endpoint, conveyor_start_direction, end_direction)
+			var route_length := _conveyor_route_length(route)
+			var first_direction := route[1] - route[0] if route.size() > 1 else delta
+			preview_yaw = atan2(-first_direction.x, -first_direction.z)
 			preview_position = conveyor_start + delta * 0.5
 			preview_position.y = 0.15
-			var visual_length := maxf(length, 2.4)
-			build_preview.position = preview_position
-			build_preview.rotation = Vector3(0, preview_yaw, 0)
-			build_preview.scale = Vector3(1, 1, visual_length / 2.4)
+			_update_preview_route(route)
 			check_size = Vector3(0.82, 0.14, maxf(length - 0.25, 0.2))
 			check_position = preview_position + Vector3(0, 0.12, 0)
-			cost = ceili(length / 2.4) * 10
+			cost = ceili(route_length / 2.4) * 10
 		else:
 			var branch_attachment := _find_branch_attachment(target)
 			if not branch_attachment.is_empty():
@@ -1403,9 +1497,9 @@ func _update_build_preview() -> void:
 				preview_yaw = atan2(-preview_start_direction.x, -preview_start_direction.z)
 			else:
 				preview_yaw = player.rotation.y
-			build_preview.position = preview_position
-			build_preview.rotation = Vector3(0, preview_yaw, 0)
-			build_preview.scale = Vector3(1, 1, 1)
+			var preview_direction := Vector3(0, 0, -1).rotated(Vector3.UP, preview_yaw)
+			var first_endpoint := preview_endpoint + preview_direction * 2.4
+			_update_preview_route(PackedVector3Array([preview_endpoint, first_endpoint]))
 			check_size = Vector3(0.82, 0.14, 2.2)
 			check_position = preview_position + Vector3(0, 0.12, 0)
 	else:
@@ -1620,16 +1714,15 @@ func _unhandled_input(event: InputEvent) -> void:
 					if hud_status:
 						hud_status.text = "Straight start set - branch will meet the belt at 90 degrees." if is_instance_valid(conveyor_branch_source) else "Conveyor start set - aim elsewhere and click to finish."
 					return
-				var direction := preview_endpoint - conveyor_start
-				direction.y = 0.0
-				var distance := direction.length()
-				var segment_count := maxi(1, ceili(distance / 2.4))
-				var segment_length := distance / float(segment_count)
-				var belt_yaw := atan2(-direction.x, -direction.z)
-				var splitter: Node3D = null
 				if is_instance_valid(conveyor_branch_source):
+					var direction := preview_endpoint - conveyor_start
+					direction.y = 0.0
+					var distance := direction.length()
+					var segment_count := maxi(1, ceili(distance / 2.4))
+					var segment_length := distance / float(segment_count)
+					var belt_yaw := atan2(-direction.x, -direction.z)
 					var branch_direction := direction.normalized()
-					splitter = _split_belt_for_branch(conveyor_branch_source, conveyor_branch_anchor, branch_direction)
+					var splitter := _split_belt_for_branch(conveyor_branch_source, conveyor_branch_anchor, branch_direction)
 					if splitter == null:
 						_update_status("Could not split this belt at the selected point.")
 						return
@@ -1650,6 +1743,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					for branch_segment in branch_belts:
 						branch_belt_ids.append(branch_segment.get_instance_id())
 					splitter.set_meta("branch_belt_ids", branch_belt_ids)
+				else:
+					var route := _build_conveyor_route(conveyor_start, preview_endpoint, conveyor_start_direction, _direction_for_conveyor_end(preview_endpoint))
+					if not _place_conveyor_route(route):
+						_update_status("Not enough credits for this conveyor route.")
+						return
 				conveyor_start_set = false
 				conveyor_branch_source = null
 				conveyor_start_direction = Vector3.ZERO
