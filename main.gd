@@ -45,6 +45,8 @@ var preview_yaw := 0.0
 var conveyor_start := Vector3.ZERO
 var preview_endpoint := Vector3.ZERO
 var conveyor_start_set := false
+var preview_start_direction := Vector3.ZERO
+var conveyor_start_direction := Vector3.ZERO
 var preview_branch_source: Node3D
 var conveyor_branch_source: Node3D
 var conveyor_branch_anchor := Vector3.ZERO
@@ -354,11 +356,13 @@ func _split_belt_for_branch(belt: Node3D, anchor: Vector3, branch_direction: Vec
 	return splitter
 
 func _create_splitter_visual(anchor: Vector3, yaw: float, branch_direction: Vector3) -> Node3D:
-	var splitter := Node3D.new()
+	var splitter := StaticBody3D.new()
 	splitter.name = "AutoSplitter"
 	splitter.position = Vector3(anchor.x, 0.15, anchor.z)
 	splitter.rotation.y = yaw
 	splitter.add_to_group("splitter_visuals")
+	splitter.add_to_group("buildable")
+	splitter.set_meta("building_kind", "Splitter")
 	splitter.set_meta("next_output", 0)
 	var dark := Color(0.08, 0.13, 0.16)
 	var steel := Color(0.42, 0.54, 0.58)
@@ -373,6 +377,12 @@ func _create_splitter_visual(anchor: Vector3, yaw: float, branch_direction: Vect
 	for x in [-0.60, 0.60]:
 		_add_machine_box(splitter, Vector3(x, 0.21, 0), Vector3(0.10, 0.08, 2.15), amber)
 	_add_machine_box(splitter, Vector3(side_sign * 1.25, 0.21, 0), Vector3(0.08, 0.08, 0.62), amber)
+	var collision := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(1.5, 0.9, 1.5)
+	collision.shape = shape
+	collision.position.y = 0.28
+	splitter.add_child(collision)
 	add_child(splitter)
 	return splitter
 
@@ -390,8 +400,11 @@ func _choose_splitter_output(splitter: Node3D) -> Node3D:
 	var next_index := int(splitter.get_meta("next_output", 0)) % outputs.size()
 	for offset in range(outputs.size()):
 		var index := (next_index + offset) % outputs.size()
-		var belt := outputs[index] as Node3D
-		if is_instance_valid(belt) and _belt_has_space(belt, 0.0):
+		var output = outputs[index]
+		if not is_instance_valid(output):
+			continue
+		var belt := output as Node3D
+		if _belt_has_space(belt, 0.0):
 			splitter.set_meta("next_output", (index + 1) % outputs.size())
 			return belt
 	return null
@@ -429,7 +442,7 @@ func _snap_conveyor_point(raw_point: Vector3, is_start: bool) -> Vector3:
 			candidates.append(_press_intake(node))
 		for node in get_tree().get_nodes_in_group("sell_stations"):
 			candidates.append(_spaceport_intake(node))
-	var best := Vector3(round(raw_point.x), 0.0, round(raw_point.z))
+	var best := Vector3(round(raw_point.x / 2.0) * 2.0, 0.0, round(raw_point.z / 2.0) * 2.0)
 	var best_distance := 2.6
 	for candidate in candidates:
 		var distance := Vector2(candidate.x - raw_point.x, candidate.z - raw_point.z).length()
@@ -472,6 +485,32 @@ func _branch_endpoint(raw_point: Vector3) -> Vector3:
 	var length := maxf(2.4, absf(offset.dot(direction)))
 	return conveyor_branch_anchor + direction * length
 
+func _direction_for_conveyor_start(point: Vector3) -> Vector3:
+	for node in get_tree().get_nodes_in_group("dust_extractors"):
+		if _extractor_outlet(node).distance_to(point) < 0.35:
+			return Vector3(0, 0, -1)
+	for node in get_tree().get_nodes_in_group("dust_presses"):
+		if _press_outlet(node).distance_to(point) < 0.35:
+			return Vector3(0, 0, -1)
+	for node in get_tree().get_nodes_in_group("conveyor_segments"):
+		var belt := node as Node3D
+		if _belt_exit(belt).distance_to(point) < 0.35:
+			return (belt.get_meta("direction") as Vector3).normalized()
+	return Vector3.ZERO
+
+func _straight_grid_endpoint(raw_point: Vector3) -> Vector3:
+	var direction := conveyor_start_direction.normalized()
+	var snapped := _snap_conveyor_point(raw_point, false)
+	var snapped_offset := snapped - conveyor_start
+	snapped_offset.y = 0.0
+	var lateral_error := absf(snapped_offset.cross(direction).y)
+	if lateral_error < 0.3 and snapped_offset.dot(direction) > 0.1:
+		return snapped
+	var raw_offset := raw_point - conveyor_start
+	raw_offset.y = 0.0
+	var distance := maxf(2.4, roundf(raw_offset.dot(direction) / 2.0) * 2.0)
+	return conveyor_start + direction * distance
+
 func _is_allowed_conveyor_overlap(collider: Object, start: Vector3, finish: Vector3) -> bool:
 	if not collider is Node:
 		return false
@@ -484,6 +523,8 @@ func _is_allowed_conveyor_overlap(collider: Object, start: Vector3, finish: Vect
 		return Vector2(node.global_position.x - finish.x, node.global_position.z - finish.z).length() < 2.8
 	if node.is_in_group("sell_stations"):
 		return Vector2(_spaceport_intake(node).x - finish.x, _spaceport_intake(node).z - finish.z).length() < 2.8
+	if node.is_in_group("splitter_visuals"):
+		return Vector2(node.global_position.x - start.x, node.global_position.z - start.z).length() < 2.8 or Vector2(node.global_position.x - finish.x, node.global_position.z - finish.z).length() < 2.8
 	return false
 
 func _find_belt_at_entry(point: Vector3, excluded: Node = null) -> Node3D:
@@ -1065,6 +1106,9 @@ func _dismantle_building(building: Node3D) -> void:
 	if not is_instance_valid(building):
 		return
 	var kind := str(building.get_meta("building_kind", building.name))
+	if kind == "Splitter":
+		_dismantle_splitter(building)
+		return
 	var refund := 5 if kind == "Foerderband" else (75 if kind == "Staubfoerderer" else (125 if kind == "Staubpresse" else 250))
 	var building_id := building.get_instance_id()
 	if kind == "Foerderband":
@@ -1078,6 +1122,47 @@ func _dismantle_building(building: Node3D) -> void:
 	money += refund
 	_update_economy_ui()
 	_update_status("Dismantled %s. Refund: %d cr." % [kind, refund])
+
+func _dismantle_splitter(splitter: Node3D) -> void:
+	var input_value = splitter.get_meta("input_belt", null)
+	var straight_value = splitter.get_meta("straight_belt", null)
+	var input_belt: Node3D = input_value as Node3D if is_instance_valid(input_value) else null
+	var straight_belt: Node3D = straight_value as Node3D if is_instance_valid(straight_value) else null
+	var branch_belts: Array = splitter.get_meta("branch_belts", [])
+	var merged_belt: Node3D = null
+	if is_instance_valid(input_belt) and is_instance_valid(straight_belt):
+		var input_length := float(input_belt.get_meta("length"))
+		var straight_length := float(straight_belt.get_meta("length"))
+		var direction := (input_belt.get_meta("direction") as Vector3).normalized()
+		var total_length := input_length + straight_length
+		var entry := _belt_entry(input_belt)
+		var yaw := atan2(-direction.x, -direction.z)
+		merged_belt = add_conveyor(entry + direction * (total_length * 0.5), yaw, total_length, true)
+		if is_instance_valid(merged_belt):
+			for index in range(conveyor_items.size()):
+				var item: Dictionary = conveyor_items[index]
+				var old_belt = item.get("belt")
+				if old_belt == input_belt:
+					item["progress"] = float(item.get("progress", 0.0)) * input_length / total_length
+					item["belt"] = merged_belt
+				elif old_belt == straight_belt:
+					item["progress"] = (input_length + float(item.get("progress", 0.0)) * straight_length) / total_length
+					item["belt"] = merged_belt
+				conveyor_items[index] = item
+		input_belt.queue_free()
+		straight_belt.queue_free()
+	for branch_belt in branch_belts:
+		if not is_instance_valid(branch_belt):
+			continue
+		for index in range(conveyor_items.size() - 1, -1, -1):
+			if conveyor_items[index].get("belt") == branch_belt:
+				_remove_conveyor_item(index)
+		branch_belt.queue_free()
+	if focused_building == splitter:
+		_close_building_ui()
+	splitter.queue_free()
+	_update_economy_ui()
+	_update_status("Splitter removed; straight belt restored.")
 
 func _open_building_ui(building: Node3D) -> void:
 	focused_building = building
@@ -1104,6 +1189,8 @@ func _open_building_ui(building: Node3D) -> void:
 		info = "Belt speed: %.2f m/s\nFlow: 2.4 m per segment\nConnected from previous belt: %s\nConnected to next belt: %s" % [_current_belt_speed(), "Yes" if connected_from else "No", "Yes" if connected_forward else "No"]
 	elif kind == "Spaceport":
 		info = "Cargo dock: connect a conveyor to the marked intake on the front (+Z).\nDust: %d cr each\nCompacted dust: %d cr each\nService fee: 10%%\nNet payout: dust %d cr  |  compacted dust %d cr\nItems are sold automatically when they reach the dock." % [DUST_SELL_PRICE, COMPACTED_DUST_SELL_PRICE, DUST_SELL_PRICE - int(round(DUST_SELL_PRICE * SPACEPORT_FEE_RATE)), COMPACTED_DUST_SELL_PRICE - int(round(COMPACTED_DUST_SELL_PRICE * SPACEPORT_FEE_RATE))]
+	elif kind == "Splitter":
+		info = "Automatic splitter\nItems alternate between the straight output and the side branch.\nPress X or use the button below to remove it and restore the straight belt."
 	else:
 		info = "Upgrade station\nMachine efficiency: level %d (%.1f items per dust)\nConveyor speed: %.2f m/s\nUpgrades affect all placed machines and belts." % [machine_upgrade_level, 1.0 + 0.5 * float(machine_upgrade_level), _current_belt_speed()]
 	building_info.text = info
@@ -1119,7 +1206,7 @@ func _open_building_ui(building: Node3D) -> void:
 	if upgrade_belt_button.visible:
 		upgrade_belt_button.text = "Conveyor speed +35%%  |  %d cr" % (250 * (belt_upgrade_level + 1))
 	if can_dismantle:
-		dismantle_button.text = "Dismantle  |  X  |  Refund %d cr" % (5 if kind == "Foerderband" else (75 if kind == "Staubfoerderer" else (125 if kind == "Staubpresse" else 250)))
+		dismantle_button.text = "Dismantle  |  X  |  Refund %d cr" % (0 if kind == "Splitter" else (5 if kind == "Foerderband" else (75 if kind == "Staubfoerderer" else (125 if kind == "Staubpresse" else 250))))
 	building_overlay.visible = true
 	get_tree().paused = true
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -1153,6 +1240,8 @@ func _upgrade_conveyor_speed() -> void:
 func _select_building(kind: String) -> void:
 	selected_building = kind
 	conveyor_start_set = false
+	conveyor_start_direction = Vector3.ZERO
+	preview_start_direction = Vector3.ZERO
 	conveyor_branch_source = null
 	preview_branch_source = null
 	build_overlay.visible = false
@@ -1168,6 +1257,8 @@ func _close_build_menu() -> void:
 	build_overlay.visible = false
 	selected_building = ""
 	conveyor_start_set = false
+	conveyor_start_direction = Vector3.ZERO
+	preview_start_direction = Vector3.ZERO
 	conveyor_branch_source = null
 	preview_branch_source = null
 	_clear_build_preview()
@@ -1179,6 +1270,8 @@ func toggle_build_menu() -> void:
 	build_overlay.visible = not build_overlay.visible
 	selected_building = ""
 	conveyor_start_set = false
+	conveyor_start_direction = Vector3.ZERO
+	preview_start_direction = Vector3.ZERO
 	_clear_build_preview()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if build_overlay.visible else Input.MOUSE_MODE_CAPTURED
 	if build_overlay.visible:
@@ -1260,7 +1353,12 @@ func _update_build_preview() -> void:
 	var cost := 150 if selected_building == "Staubfoerderer" else (250 if selected_building == "Staubpresse" else (500 if selected_building == "UpgradeStation" else 10))
 	if selected_building == "Foerderband":
 		if conveyor_start_set:
-			preview_endpoint = _branch_endpoint(target) if is_instance_valid(conveyor_branch_source) else _snap_conveyor_point(target, false)
+			if is_instance_valid(conveyor_branch_source):
+				preview_endpoint = _branch_endpoint(target)
+			elif conveyor_start_direction.length() > 0.5:
+				preview_endpoint = _straight_grid_endpoint(target)
+			else:
+				preview_endpoint = _snap_conveyor_point(target, false)
 			var delta := preview_endpoint - conveyor_start
 			delta.y = 0.0
 			var length := delta.length()
@@ -1283,9 +1381,11 @@ func _update_build_preview() -> void:
 			if not branch_attachment.is_empty():
 				preview_branch_source = branch_attachment["belt"]
 				preview_endpoint = branch_attachment["anchor"]
+				preview_start_direction = Vector3.ZERO
 			else:
 				preview_branch_source = null
 				preview_endpoint = _snap_conveyor_point(target, true)
+				preview_start_direction = _direction_for_conveyor_start(preview_endpoint)
 			preview_position = Vector3(preview_endpoint.x, 0.15, preview_endpoint.z)
 			if is_instance_valid(preview_branch_source):
 				var source_direction := (preview_branch_source.get_meta("direction") as Vector3).normalized()
@@ -1293,6 +1393,8 @@ func _update_build_preview() -> void:
 				var player_forward: Vector3 = -player.camera.global_transform.basis.z
 				var branch_direction := side if player_forward.dot(side) >= player_forward.dot(-side) else -side
 				preview_yaw = atan2(-branch_direction.x, -branch_direction.z)
+			elif preview_start_direction.length() > 0.5:
+				preview_yaw = atan2(-preview_start_direction.x, -preview_start_direction.z)
 			else:
 				preview_yaw = player.rotation.y
 			build_preview.position = preview_position
@@ -1507,6 +1609,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					conveyor_start = preview_endpoint
 					conveyor_start_set = true
 					conveyor_branch_source = preview_branch_source if is_instance_valid(preview_branch_source) else null
+					conveyor_start_direction = preview_start_direction if not is_instance_valid(conveyor_branch_source) else Vector3.ZERO
 					conveyor_branch_anchor = preview_endpoint
 					if hud_status:
 						hud_status.text = "Straight start set - branch will meet the belt at 90 degrees." if is_instance_valid(conveyor_branch_source) else "Conveyor start set - aim elsewhere and click to finish."
@@ -1525,17 +1628,22 @@ func _unhandled_input(event: InputEvent) -> void:
 						_update_status("Could not split this belt at the selected point.")
 						return
 				var branch_belt: Node3D = null
+				var branch_belts: Array[Node3D] = []
 				for index in range(segment_count):
 					var segment_pos := conveyor_start + direction * ((float(index) + 0.5) / float(segment_count))
 					var placed_belt := add_conveyor(segment_pos, belt_yaw, segment_length)
 					if index == 0:
 						branch_belt = placed_belt
+					if splitter != null and is_instance_valid(placed_belt):
+						branch_belts.append(placed_belt)
 				if splitter != null and is_instance_valid(branch_belt):
 					var output_belts: Array = splitter.get_meta("output_belts", [])
 					output_belts.append(branch_belt)
 					splitter.set_meta("output_belts", output_belts)
+					splitter.set_meta("branch_belts", branch_belts)
 				conveyor_start_set = false
 				conveyor_branch_source = null
+				conveyor_start_direction = Vector3.ZERO
 			else:
 				place_building(selected_building, preview_position)
 			if hud_status:
