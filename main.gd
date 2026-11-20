@@ -25,6 +25,9 @@ var build_preview: MeshInstance3D
 var preview_valid := false
 var preview_position := Vector3.ZERO
 var preview_yaw := 0.0
+var conveyor_start := Vector3.ZERO
+var preview_endpoint := Vector3.ZERO
+var conveyor_start_set := false
 var key_labels := {"move_forward": "W", "move_back": "S", "move_left": "A", "move_right": "D", "jump": "Space"}
 
 func _ready() -> void:
@@ -176,45 +179,74 @@ func _add_box(pos: Vector3, size: Vector3, color: Color) -> void:
 func _build_player() -> void:
 	_build_network_menu()
 
-func add_conveyor(pos: Vector3, yaw: float) -> void:
+func add_conveyor(pos: Vector3, yaw: float, segment_length: float = 2.4) -> void:
 	if money < 10:
 		_update_status("Nicht genug Geld fuer ein Foerderband (10 cr).")
 		return
 	money -= 10
-	var belt := Node3D.new()
+	var belt := StaticBody3D.new()
 	belt.name = "ConveyorSegment"
-	belt.position = Vector3(round(pos.x), 0.15, round(pos.z))
+	belt.add_to_group("buildable")
+	belt.set_meta("building_kind", "Foerderband")
+	belt.position = Vector3(pos.x, 0.15, pos.z)
 	belt.rotation.y = yaw
 	var base := MeshInstance3D.new()
 	var base_mesh := BoxMesh.new()
-	base_mesh.size = Vector3(1.0, 0.16, 2.4)
+	base_mesh.size = Vector3(1.0, 0.16, segment_length)
 	base.mesh = base_mesh
 	var steel := StandardMaterial3D.new()
 	steel.albedo_color = Color(0.17, 0.23, 0.27)
 	steel.metallic = 0.72
 	base.material_override = steel
 	belt.add_child(base)
-	for z in [-0.8, 0.0, 0.8]:
+	var belt_surface := MeshInstance3D.new()
+	var surface_mesh := BoxMesh.new()
+	surface_mesh.size = Vector3(0.78, 0.045, segment_length * 0.94)
+	belt_surface.mesh = surface_mesh
+	belt_surface.position.y = 0.105
+	var rubber := StandardMaterial3D.new()
+	rubber.albedo_color = Color(0.055, 0.075, 0.08)
+	rubber.roughness = 0.92
+	belt_surface.material_override = rubber
+	belt.add_child(belt_surface)
+	for x in [-0.48, 0.48]:
+		var rail := MeshInstance3D.new()
+		var rail_mesh := BoxMesh.new()
+		rail_mesh.size = Vector3(0.08, 0.28, segment_length)
+		rail.mesh = rail_mesh
+		rail.position = Vector3(x, 0.12, 0)
+		rail.material_override = steel
+		belt.add_child(rail)
+	for z in [-segment_length * 0.34, 0.0, segment_length * 0.34]:
 		var roller := MeshInstance3D.new()
 		var roller_mesh := CylinderMesh.new()
 		roller_mesh.top_radius = 0.09
 		roller_mesh.bottom_radius = 0.09
-		roller_mesh.height = 1.05
+		roller_mesh.height = 0.92
 		roller.mesh = roller_mesh
 		roller.rotation.z = deg_to_rad(90)
 		roller.position = Vector3(0, 0.12, z)
 		roller.material_override = steel
 		belt.add_child(roller)
+	for z in [-segment_length * 0.32, segment_length * 0.32]:
+		for x in [-0.36, 0.36]:
+			var support := MeshInstance3D.new()
+			var support_mesh := BoxMesh.new()
+			support_mesh.size = Vector3(0.10, 0.30, 0.10)
+			support.mesh = support_mesh
+			support.position = Vector3(x, -0.22, z)
+			support.material_override = steel
+			belt.add_child(support)
 	var collision := CollisionShape3D.new()
 	var belt_shape := BoxShape3D.new()
-	belt_shape.size = Vector3(1.0, 0.16, 2.4)
+	belt_shape.size = Vector3(1.0, 0.16, segment_length)
 	collision.shape = belt_shape
 	belt.add_child(collision)
 	add_child(belt)
 	_update_economy_ui()
 
 func place_building(kind: String, pos: Vector3) -> void:
-	var cost := 150 if kind == "Staubförderer" else 250
+	var cost := 150 if kind.begins_with("Staubf") else 250
 	if not restoring_save and money < cost:
 		_update_status("Nicht genug Geld für %s. Benötigt: %d cr." % [kind, cost])
 		return
@@ -222,22 +254,16 @@ func place_building(kind: String, pos: Vector3) -> void:
 		money -= cost
 	var body := StaticBody3D.new()
 	body.name = kind
+	body.add_to_group("buildable")
+	body.set_meta("building_kind", kind)
 	body.position = Vector3(round(pos.x / 2.0) * 2.0, 1.0, round(pos.z / 2.0) * 2.0)
-	var mesh_instance := MeshInstance3D.new()
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3(2.0, 2.0, 2.0)
-	mesh_instance.mesh = mesh
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.82, 0.43, 0.18) if kind == "Staubförderer" else Color(0.45, 0.58, 0.64)
-	material.metallic = 0.35
-	mesh_instance.material_override = material
-	body.add_child(mesh_instance)
+	_build_machine_model(body, kind)
 	var collision := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = mesh.size
+	box.size = Vector3(2.0, 2.0, 2.0)
 	collision.shape = box
 	body.add_child(collision)
-	if kind == "Staubförderer":
+	if kind.begins_with("Staubf"):
 		body.add_to_group("dust_extractors")
 	else:
 		body.add_to_group("dust_presses")
@@ -245,6 +271,67 @@ func place_building(kind: String, pos: Vector3) -> void:
 	selected_building = ""
 	_update_economy_ui()
 
+func _build_machine_model(parent: Node3D, kind: String) -> void:
+	var extractor := kind == "Staubfoerderer"
+	var shell_color := Color(0.72, 0.29, 0.12) if extractor else Color(0.24, 0.37, 0.43)
+	var steel := Color(0.46, 0.58, 0.62)
+	var dark := Color(0.10, 0.15, 0.18)
+	_add_machine_box(parent, Vector3(0, -0.78, 0), Vector3(2.15, 0.30, 2.15), dark)
+	_add_machine_box(parent, Vector3(0, 0, 0), Vector3(1.70, 1.38, 1.55), shell_color)
+	_add_machine_box(parent, Vector3(0, 0.72, 0), Vector3(1.92, 0.16, 1.78), steel)
+	for x in [-0.82, 0.82]:
+		for z in [-0.72, 0.72]:
+			_add_machine_box(parent, Vector3(x, -0.12, z), Vector3(0.12, 1.36, 0.12), dark)
+	var lamp_material := StandardMaterial3D.new()
+	lamp_material.albedo_color = Color(0.20, 0.93, 0.75)
+	lamp_material.emission_enabled = true
+	lamp_material.emission = Color(0.04, 0.42, 0.28)
+	_add_machine_box(parent, Vector3(0.55, 0.28, -0.79), Vector3(0.25, 0.14, 0.05), Color.WHITE, lamp_material)
+	if extractor:
+		_add_machine_box(parent, Vector3(0, 0.94, 0), Vector3(1.25, 0.22, 1.15), Color(0.38, 0.21, 0.13))
+		_add_machine_cylinder(parent, Vector3(0, 1.25, 0), 0.50, 0.42, shell_color)
+		_add_machine_box(parent, Vector3(0, -0.55, -0.35), Vector3(1.25, 0.24, 0.22), steel)
+		for x in [-0.42, 0.42]:
+			_add_machine_cylinder(parent, Vector3(x, -0.69, 0.62), 0.16, 0.42, steel)
+	else:
+		_add_machine_cylinder(parent, Vector3(0, 1.04, 0), 0.30, 0.62, steel)
+		_add_machine_box(parent, Vector3(0, 0.72, 0), Vector3(1.28, 0.14, 1.15), shell_color)
+		_add_machine_box(parent, Vector3(0, -0.36, -0.92), Vector3(0.92, 0.28, 0.62), dark)
+		_add_machine_box(parent, Vector3(0, -0.55, -1.12), Vector3(0.74, 0.12, 0.30), Color(0.93, 0.58, 0.17))
+	for i in range(4):
+		_add_machine_box(parent, Vector3(-0.60 + i * 0.4, -0.48, 0.797), Vector3(0.18, 0.07, 0.035), Color(0.96, 0.70, 0.19))
+
+func _add_machine_box(parent: Node3D, pos: Vector3, size: Vector3, color: Color, override_material: Material = null) -> void:
+	var detail := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = size
+	detail.mesh = mesh
+	detail.position = pos
+	if override_material != null:
+		detail.material_override = override_material
+	else:
+		var material := StandardMaterial3D.new()
+		material.albedo_color = color
+		material.metallic = 0.48
+		material.roughness = 0.38
+		detail.material_override = material
+	parent.add_child(detail)
+
+func _add_machine_cylinder(parent: Node3D, pos: Vector3, radius: float, height: float, color: Color) -> void:
+	var detail := MeshInstance3D.new()
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = radius
+	mesh.bottom_radius = radius * 1.12
+	mesh.height = height
+	mesh.radial_segments = 12
+	detail.mesh = mesh
+	detail.position = pos
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.metallic = 0.68
+	material.roughness = 0.28
+	detail.material_override = material
+	parent.add_child(detail)
 func mine_rock(rock: Node3D) -> void:
 	if is_instance_valid(rock) and rock.name.begins_with("OreRock"):
 		rock.queue_free()
@@ -449,6 +536,7 @@ func _build_build_menu() -> void:
 
 func _select_building(kind: String) -> void:
 	selected_building = kind
+	conveyor_start_set = false
 	build_overlay.visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_create_build_preview()
@@ -458,6 +546,7 @@ func _select_building(kind: String) -> void:
 func _close_build_menu() -> void:
 	build_overlay.visible = false
 	selected_building = ""
+	conveyor_start_set = false
 	_clear_build_preview()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -466,6 +555,7 @@ func toggle_build_menu() -> void:
 		return
 	build_overlay.visible = not build_overlay.visible
 	selected_building = ""
+	conveyor_start_set = false
 	_clear_build_preview()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if build_overlay.visible else Input.MOUSE_MODE_CAPTURED
 	if build_overlay.visible:
@@ -478,17 +568,46 @@ func _create_build_preview() -> void:
 		var belt_mesh := BoxMesh.new()
 		belt_mesh.size = Vector3(1.0, 0.16, 2.4)
 		build_preview.mesh = belt_mesh
+		for x in [-0.48, 0.48]:
+			var rail := MeshInstance3D.new()
+			var rail_mesh := BoxMesh.new()
+			rail_mesh.size = Vector3(0.08, 0.26, 2.4)
+			rail.mesh = rail_mesh
+			rail.position = Vector3(x, 0.10, 0)
+			build_preview.add_child(rail)
 	else:
-		var machine_mesh := BoxMesh.new()
-		machine_mesh.size = Vector3(2.0, 2.0, 2.0)
-		build_preview.mesh = machine_mesh
-	var ghost_material := StandardMaterial3D.new()
-	ghost_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	ghost_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	ghost_material.albedo_color = Color(0.25, 1.0, 0.48, 0.42)
-	build_preview.material_override = ghost_material
+		_build_machine_model(build_preview, selected_building)
 	add_child(build_preview)
+	_set_preview_tint(build_preview, Color(0.25, 1.0, 0.48, 0.42))
 	build_preview.visible = false
+
+func _set_preview_tint(node: Node, tint: Color) -> void:
+	if node is MeshInstance3D:
+		var ghost := StandardMaterial3D.new()
+		ghost.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		ghost.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		ghost.albedo_color = tint
+		node.material_override = ghost
+	for child in node.get_children():
+		_set_preview_tint(child, tint)
+
+func copy_building_from_aim(camera: Camera3D) -> void:
+	var origin := camera.global_position
+	var direction := -camera.global_transform.basis.z
+	var query := PhysicsRayQueryParameters3D.create(origin, origin + direction * 24.0)
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	if not hit.has("collider"):
+		_update_status("Aim at a placed building to copy it.")
+		return
+	var target = hit["collider"]
+	if target is Node and target.is_in_group("buildable"):
+		var kind := str(target.get_meta("building_kind", ""))
+		if kind != "":
+			_select_building(kind)
+			if hud_status:
+				hud_status.text = "Copied %s - preview follows your aim." % kind
+			return
+	_update_status("Aim at a placed building to copy it.")
 
 func _clear_build_preview() -> void:
 	if is_instance_valid(build_preview):
@@ -504,7 +623,7 @@ func _update_build_preview() -> void:
 		build_preview.visible = false
 		return
 	var origin: Vector3 = player.camera.global_position
-	var end: Vector3 = origin + -player.camera.global_transform.basis.z * 12.0
+	var end: Vector3 = origin + -player.camera.global_transform.basis.z * 18.0
 	var ray := PhysicsRayQueryParameters3D.create(origin, end)
 	ray.exclude = [player]
 	var hit := get_world_3d().direct_space_state.intersect_ray(ray)
@@ -512,29 +631,57 @@ func _update_build_preview() -> void:
 		build_preview.visible = false
 		preview_valid = false
 		return
-	var ground_point: Vector3 = hit["position"]
-	preview_yaw = player.rotation.y
+	var target: Vector3 = hit["position"]
+	var check_size: Vector3
+	var check_position: Vector3
+	var cost := 150 if selected_building == "Staubfoerderer" else (250 if selected_building == "Staubpresse" else 10)
 	if selected_building == "Foerderband":
-		preview_position = Vector3(round(ground_point.x), 0.15, round(ground_point.z))
-		build_preview.position = preview_position
-		build_preview.rotation.y = preview_yaw
+		if conveyor_start_set:
+			preview_endpoint = Vector3(round(target.x), 0.0, round(target.z))
+			var delta := preview_endpoint - conveyor_start
+			delta.y = 0.0
+			var length := delta.length()
+			if length < 0.1:
+				build_preview.visible = false
+				preview_valid = false
+				return
+			preview_yaw = atan2(-delta.x, -delta.z)
+			preview_position = conveyor_start + delta * 0.5
+			preview_position.y = 0.15
+			var visual_length := maxf(length, 2.4)
+			build_preview.position = preview_position
+			build_preview.rotation = Vector3(0, preview_yaw, 0)
+			build_preview.scale = Vector3(1, 1, visual_length / 2.4)
+			check_size = Vector3(0.82, 0.14, maxf(length - 0.25, 0.2))
+			check_position = preview_position + Vector3(0, 0.12, 0)
+			cost = ceili(length / 2.4) * 10
+		else:
+			preview_position = Vector3(round(target.x), 0.15, round(target.z))
+			preview_endpoint = Vector3(preview_position.x, 0.0, preview_position.z)
+			preview_yaw = player.rotation.y
+			build_preview.position = preview_position
+			build_preview.rotation = Vector3(0, preview_yaw, 0)
+			build_preview.scale = Vector3(1, 1, 1)
+			check_size = Vector3(0.82, 0.14, 2.2)
+			check_position = preview_position + Vector3(0, 0.12, 0)
 	else:
-		preview_position = Vector3(round(ground_point.x / 2.0) * 2.0, 1.0, round(ground_point.z / 2.0) * 2.0)
+		preview_position = Vector3(round(target.x / 2.0) * 2.0, 1.0, round(target.z / 2.0) * 2.0)
+		preview_yaw = 0.0
 		build_preview.position = preview_position
 		build_preview.rotation = Vector3.ZERO
+		build_preview.scale = Vector3.ONE
+		check_size = Vector3(1.8, 1.8, 1.8)
+		check_position = preview_position
 	var shape := BoxShape3D.new()
-	var clearance := Vector3(1.8, 0.14, 2.2) if selected_building == "Foerderband" else Vector3(1.8, 1.8, 1.8)
-	shape.size = clearance
+	shape.size = check_size
 	var query := PhysicsShapeQueryParameters3D.new()
 	query.shape = shape
-	query.transform = Transform3D(Basis.IDENTITY, preview_position + Vector3(0, 0.12, 0) if selected_building == "Foerderband" else preview_position)
+	query.transform = Transform3D(Basis(Vector3.UP, preview_yaw), check_position)
 	query.exclude = [player.get_rid()]
 	query.collide_with_areas = false
-	var overlaps := get_world_3d().direct_space_state.intersect_shape(query, 8)
-	var cost := 10 if selected_building == "Foerderband" else (150 if selected_building == "Staubfoerderer" else 250)
+	var overlaps := get_world_3d().direct_space_state.intersect_shape(query, 12)
 	preview_valid = overlaps.is_empty() and money >= cost
-	var ghost_material := build_preview.material_override as StandardMaterial3D
-	ghost_material.albedo_color = Color(0.25, 1.0, 0.48, 0.42) if preview_valid else Color(1.0, 0.22, 0.18, 0.48)
+	_set_preview_tint(build_preview, Color(0.25, 1.0, 0.48, 0.42) if preview_valid else Color(1.0, 0.22, 0.18, 0.48))
 	build_preview.visible = true
 func _update_economy_ui() -> void:
 	if is_instance_valid(balance_label):
@@ -704,7 +851,22 @@ func _unhandled_input(event: InputEvent) -> void:
 	if selected_building != "" and event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		if preview_valid:
 			if selected_building == "Foerderband":
-				add_conveyor(preview_position, preview_yaw)
+				if not conveyor_start_set:
+					conveyor_start = preview_endpoint
+					conveyor_start_set = true
+					if hud_status:
+						hud_status.text = "Conveyor start set - aim elsewhere and click to finish."
+					return
+				var direction := preview_endpoint - conveyor_start
+				direction.y = 0.0
+				var distance := direction.length()
+				var segment_count := maxi(1, ceili(distance / 2.4))
+				var segment_length := distance / float(segment_count)
+				var belt_yaw := atan2(-direction.x, -direction.z)
+				for index in range(segment_count):
+					var segment_pos := conveyor_start + direction * ((float(index) + 0.5) / float(segment_count))
+					add_conveyor(segment_pos, belt_yaw, segment_length)
+				conveyor_start_set = false
 			else:
 				place_building(selected_building, preview_position)
 			if hud_status:
