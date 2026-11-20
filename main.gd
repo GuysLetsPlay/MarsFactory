@@ -10,6 +10,8 @@ var dust := 0
 var compacted_dust := 0
 var selected_building := ""
 var machine_timer := 0.0
+var extractor_timers: Dictionary = {}
+var conveyor_items: Array[Dictionary] = []
 var balance_label: Label
 var production_label: Label
 var settings_panel: PanelContainer
@@ -50,17 +52,7 @@ func _process(delta: float) -> void:
 	if get_tree().paused:
 		return
 	_update_build_preview()
-	machine_timer += delta
-	if machine_timer >= 1.0:
-		machine_timer -= 1.0
-		var extractors := get_tree().get_nodes_in_group("dust_extractors")
-		dust += extractors.size()
-		var presses := get_tree().get_nodes_in_group("dust_presses")
-		for _press in presses:
-			if dust >= 2:
-				dust -= 2
-				compacted_dust += 1
-		_update_economy_ui()
+	_simulate_conveyor_factory(delta)
 
 func _setup_inputs() -> void:
 	var bindings := {"move_forward": KEY_W, "move_back": KEY_S, "move_left": KEY_A, "move_right": KEY_D, "jump": KEY_SPACE}
@@ -187,9 +179,12 @@ func add_conveyor(pos: Vector3, yaw: float, segment_length: float = 2.4) -> void
 	var belt := StaticBody3D.new()
 	belt.name = "ConveyorSegment"
 	belt.add_to_group("buildable")
+	belt.add_to_group("conveyor_segments")
 	belt.set_meta("building_kind", "Foerderband")
 	belt.position = Vector3(pos.x, 0.15, pos.z)
 	belt.rotation.y = yaw
+	belt.set_meta("direction", Vector3(0, 0, -1).rotated(Vector3.UP, yaw))
+	belt.set_meta("length", segment_length)
 	var base := MeshInstance3D.new()
 	var base_mesh := BoxMesh.new()
 	base_mesh.size = Vector3(1.0, 0.16, segment_length)
@@ -244,6 +239,97 @@ func add_conveyor(pos: Vector3, yaw: float, segment_length: float = 2.4) -> void
 	belt.add_child(collision)
 	add_child(belt)
 	_update_economy_ui()
+
+func _belt_entry(belt: Node3D) -> Vector3:
+	return belt.global_position - (belt.get_meta("direction") as Vector3) * float(belt.get_meta("length")) * 0.5
+
+func _belt_exit(belt: Node3D) -> Vector3:
+	return belt.global_position + (belt.get_meta("direction") as Vector3) * float(belt.get_meta("length")) * 0.5
+
+func _find_belt_at_entry(point: Vector3, excluded: Node = null) -> Node3D:
+	var closest: Node3D = null
+	var best_distance := 2.0
+	for node in get_tree().get_nodes_in_group("conveyor_segments"):
+		if node == excluded or not is_instance_valid(node):
+			continue
+		var belt := node as Node3D
+		var distance := _belt_entry(belt).distance_to(point)
+		if distance < best_distance:
+			best_distance = distance
+			closest = belt
+	return closest
+
+func _spawn_dust_item(belt: Node3D) -> void:
+	var item := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.17
+	mesh.height = 0.30
+	item.mesh = mesh
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.88, 0.49, 0.22)
+	material.roughness = 0.85
+	item.material_override = material
+	add_child(item)
+	var entry := _belt_entry(belt)
+	item.global_position = entry + Vector3(0, 0.36, 0)
+	conveyor_items.append({"visual": item, "belt": belt, "progress": 0.0})
+	dust += 1
+	_update_economy_ui()
+
+func _find_press_at(point: Vector3) -> Node3D:
+	for node in get_tree().get_nodes_in_group("dust_presses"):
+		var press := node as Node3D
+		var intake := press.global_position + Vector3(0, -0.72, 1.25)
+		if intake.distance_to(point) <= 2.2:
+			return press
+	return null
+
+func _remove_conveyor_item(index: int) -> void:
+	var visual = conveyor_items[index].get("visual")
+	if is_instance_valid(visual):
+		visual.queue_free()
+	conveyor_items.remove_at(index)
+
+func _simulate_conveyor_factory(delta: float) -> void:
+	for extractor in get_tree().get_nodes_in_group("dust_extractors"):
+		var instance_id := extractor.get_instance_id()
+		var remaining := float(extractor_timers.get(instance_id, 1.0)) - delta
+		if remaining <= 0.0:
+			var outlet: Vector3 = extractor.global_position + Vector3(0, -0.70, -1.0)
+			var belt := _find_belt_at_entry(outlet)
+			if belt != null and conveyor_items.size() < 40:
+				_spawn_dust_item(belt)
+				remaining = 2.0
+			else:
+				remaining = 0.25
+		extractor_timers[instance_id] = remaining
+	for index in range(conveyor_items.size() - 1, -1, -1):
+		var item: Dictionary = conveyor_items[index]
+		var belt = item.get("belt")
+		if not is_instance_valid(belt):
+			_remove_conveyor_item(index)
+			continue
+		var belt_length := float(belt.get_meta("length"))
+		var progress := float(item.get("progress", 0.0)) + delta * 1.6 / belt_length
+		if progress >= 1.0:
+			var exit_point := _belt_exit(belt)
+			var next_belt := _find_belt_at_entry(exit_point, belt)
+			if next_belt != null:
+				item["belt"] = next_belt
+				progress = 0.0
+			elif _find_press_at(exit_point) != null:
+				compacted_dust += 1
+				dust = maxi(0, dust - 1)
+				_remove_conveyor_item(index)
+				_update_economy_ui()
+				continue
+			else:
+				progress = 1.0
+		item["progress"] = progress
+		conveyor_items[index] = item
+		var entry := _belt_entry(item["belt"])
+		var exit := _belt_exit(item["belt"])
+		(item["visual"] as Node3D).global_position = entry.lerp(exit, progress) + Vector3(0, 0.36, 0)
 
 func place_building(kind: String, pos: Vector3) -> void:
 	var cost := 150 if kind.begins_with("Staubf") else 250
@@ -541,7 +627,10 @@ func _select_building(kind: String) -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_create_build_preview()
 	if hud_status:
-		hud_status.text = "%s selected - click ground to place." % kind
+		if kind == "Foerderband":
+			hud_status.text = "Conveyor selected - click a start point, drag aim, click again to finish."
+		else:
+			hud_status.text = "%s selected - click ground to place." % kind
 
 func _close_build_menu() -> void:
 	build_overlay.visible = false
