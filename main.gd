@@ -45,6 +45,9 @@ var preview_yaw := 0.0
 var conveyor_start := Vector3.ZERO
 var preview_endpoint := Vector3.ZERO
 var conveyor_start_set := false
+var preview_branch_source: Node3D
+var conveyor_branch_source: Node3D
+var conveyor_branch_anchor := Vector3.ZERO
 var key_labels := {"move_forward": "W", "move_back": "S", "move_left": "A", "move_right": "D", "jump": "Space"}
 
 func _ready() -> void:
@@ -243,11 +246,12 @@ func _add_box(pos: Vector3, size: Vector3, color: Color) -> void:
 func _build_player() -> void:
 	_build_network_menu()
 
-func add_conveyor(pos: Vector3, yaw: float, segment_length: float = 2.4) -> void:
-	if money < 10:
+func add_conveyor(pos: Vector3, yaw: float, segment_length: float = 2.4, free_of_charge: bool = false) -> Node3D:
+	if not free_of_charge and money < 10:
 		_update_status("Nicht genug Geld fuer ein Foerderband (10 cr).")
-		return
-	money -= 10
+		return null
+	if not free_of_charge:
+		money -= 10
 	var belt := StaticBody3D.new()
 	belt.name = "ConveyorSegment"
 	belt.add_to_group("buildable")
@@ -311,6 +315,86 @@ func add_conveyor(pos: Vector3, yaw: float, segment_length: float = 2.4) -> void
 	belt.add_child(collision)
 	add_child(belt)
 	_update_economy_ui()
+	return belt
+
+func _split_belt_for_branch(belt: Node3D, anchor: Vector3, branch_direction: Vector3) -> Node3D:
+	var direction := (belt.get_meta("direction") as Vector3).normalized()
+	var old_entry := _belt_entry(belt)
+	var old_length := float(belt.get_meta("length"))
+	var split_distance := clampf((anchor - old_entry).dot(direction), 0.45, old_length - 0.45)
+	var input_length := split_distance
+	var straight_length := old_length - split_distance
+	var yaw := atan2(-direction.x, -direction.z)
+	var input_belt := add_conveyor(old_entry + direction * (input_length * 0.5), yaw, input_length, true)
+	var straight_belt := add_conveyor(anchor + direction * (straight_length * 0.5), yaw, straight_length, true)
+	if input_belt == null or straight_belt == null:
+		if is_instance_valid(input_belt):
+			input_belt.queue_free()
+		if is_instance_valid(straight_belt):
+			straight_belt.queue_free()
+		return null
+	for index in range(conveyor_items.size()):
+		var item: Dictionary = conveyor_items[index]
+		if item.get("belt") != belt:
+			continue
+		var old_progress := float(item.get("progress", 0.0))
+		var distance := old_progress * old_length
+		if distance <= split_distance:
+			item["belt"] = input_belt
+			item["progress"] = distance / input_length
+		else:
+			item["belt"] = straight_belt
+			item["progress"] = (distance - split_distance) / straight_length
+		conveyor_items[index] = item
+	var splitter := _create_splitter_visual(anchor, yaw, branch_direction)
+	splitter.set_meta("input_belt", input_belt)
+	splitter.set_meta("straight_belt", straight_belt)
+	splitter.set_meta("output_belts", [straight_belt])
+	belt.queue_free()
+	return splitter
+
+func _create_splitter_visual(anchor: Vector3, yaw: float, branch_direction: Vector3) -> Node3D:
+	var splitter := Node3D.new()
+	splitter.name = "AutoSplitter"
+	splitter.position = Vector3(anchor.x, 0.15, anchor.z)
+	splitter.rotation.y = yaw
+	splitter.add_to_group("splitter_visuals")
+	splitter.set_meta("next_output", 0)
+	var dark := Color(0.08, 0.13, 0.16)
+	var steel := Color(0.42, 0.54, 0.58)
+	var amber := Color(0.95, 0.60, 0.16)
+	_add_machine_box(splitter, Vector3(0, -0.02, 0), Vector3(1.45, 0.18, 1.45), dark)
+	_add_machine_box(splitter, Vector3(0, 0.10, 0), Vector3(0.92, 0.16, 2.35), steel)
+	_add_machine_cylinder(splitter, Vector3(0, 0.20, 0), 0.48, 0.28, Color(0.16, 0.30, 0.34))
+	_add_machine_cylinder(splitter, Vector3(0, 0.37, 0), 0.31, 0.12, amber)
+	var local_side := Vector3(1, 0, 0).rotated(Vector3.UP, yaw)
+	var side_sign := 1.0 if branch_direction.dot(local_side) >= 0.0 else -1.0
+	_add_machine_box(splitter, Vector3(side_sign * 0.75, 0.09, 0), Vector3(1.55, 0.14, 0.82), steel)
+	for x in [-0.60, 0.60]:
+		_add_machine_box(splitter, Vector3(x, 0.21, 0), Vector3(0.10, 0.08, 2.15), amber)
+	_add_machine_box(splitter, Vector3(side_sign * 1.25, 0.21, 0), Vector3(0.08, 0.08, 0.62), amber)
+	add_child(splitter)
+	return splitter
+
+func _find_splitter_for_input(belt: Node3D, exit_point: Vector3) -> Node3D:
+	for node in get_tree().get_nodes_in_group("splitter_visuals"):
+		var splitter := node as Node3D
+		if splitter.get_meta("input_belt", null) == belt and splitter.global_position.distance_to(exit_point) < 0.6:
+			return splitter
+	return null
+
+func _choose_splitter_output(splitter: Node3D) -> Node3D:
+	var outputs: Array = splitter.get_meta("output_belts", [])
+	if outputs.is_empty():
+		return null
+	var next_index := int(splitter.get_meta("next_output", 0)) % outputs.size()
+	for offset in range(outputs.size()):
+		var index := (next_index + offset) % outputs.size()
+		var belt := outputs[index] as Node3D
+		if is_instance_valid(belt) and _belt_has_space(belt, 0.0):
+			splitter.set_meta("next_output", (index + 1) % outputs.size())
+			return belt
+	return null
 
 func _belt_entry(belt: Node3D) -> Vector3:
 	return belt.global_position - (belt.get_meta("direction") as Vector3) * float(belt.get_meta("length")) * 0.5
@@ -353,6 +437,40 @@ func _snap_conveyor_point(raw_point: Vector3, is_start: bool) -> Vector3:
 			best = Vector3(candidate.x, 0.0, candidate.z)
 			best_distance = distance
 	return best
+
+func _find_branch_attachment(raw_point: Vector3) -> Dictionary:
+	var best_belt: Node3D = null
+	var best_anchor := Vector3.ZERO
+	var best_distance := 0.65
+	for node in get_tree().get_nodes_in_group("conveyor_segments"):
+		var belt := node as Node3D
+		var direction := (belt.get_meta("direction") as Vector3).normalized()
+		var entry := _belt_entry(belt)
+		var length := float(belt.get_meta("length"))
+		if length <= 0.9:
+			continue
+		var along := clampf((raw_point - entry).dot(direction), 0.45, length - 0.45)
+		var anchor := entry + direction * along
+		var distance := Vector2(raw_point.x - anchor.x, raw_point.z - anchor.z).length()
+		if distance < best_distance:
+			best_distance = distance
+			best_belt = belt
+			best_anchor = anchor
+	if best_belt == null:
+		return {}
+	best_anchor.y = 0.15
+	return {"belt": best_belt, "anchor": best_anchor}
+
+func _branch_endpoint(raw_point: Vector3) -> Vector3:
+	var base_direction := (conveyor_branch_source.get_meta("direction") as Vector3).normalized()
+	base_direction.y = 0.0
+	var side_a := base_direction.rotated(Vector3.UP, PI * 0.5).normalized()
+	var side_b := -side_a
+	var offset := raw_point - conveyor_branch_anchor
+	offset.y = 0.0
+	var direction := side_a if offset.dot(side_a) >= offset.dot(side_b) else side_b
+	var length := maxf(2.4, absf(offset.dot(direction)))
+	return conveyor_branch_anchor + direction * length
 
 func _is_allowed_conveyor_overlap(collider: Object, start: Vector3, finish: Vector3) -> bool:
 	if not collider is Node:
@@ -489,7 +607,8 @@ func _simulate_conveyor_factory(delta: float) -> void:
 		var progress := float(item.get("progress", 0.0)) + delta * _current_belt_speed() / belt_length
 		if progress >= 1.0:
 			var exit_point := _belt_exit(belt)
-			var next_belt := _find_belt_at_entry(exit_point, belt)
+			var splitter := _find_splitter_for_input(belt, exit_point)
+			var next_belt := _choose_splitter_output(splitter) if splitter != null else _find_belt_at_entry(exit_point, belt)
 			if next_belt != null and _belt_has_space(next_belt, 0.0):
 				item["belt"] = next_belt
 				progress = 0.0
@@ -1018,6 +1137,8 @@ func _upgrade_conveyor_speed() -> void:
 func _select_building(kind: String) -> void:
 	selected_building = kind
 	conveyor_start_set = false
+	conveyor_branch_source = null
+	preview_branch_source = null
 	build_overlay.visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_create_build_preview()
@@ -1031,6 +1152,8 @@ func _close_build_menu() -> void:
 	build_overlay.visible = false
 	selected_building = ""
 	conveyor_start_set = false
+	conveyor_branch_source = null
+	preview_branch_source = null
 	_clear_build_preview()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -1121,7 +1244,7 @@ func _update_build_preview() -> void:
 	var cost := 150 if selected_building == "Staubfoerderer" else (250 if selected_building == "Staubpresse" else (500 if selected_building == "UpgradeStation" else 10))
 	if selected_building == "Foerderband":
 		if conveyor_start_set:
-			preview_endpoint = _snap_conveyor_point(target, false)
+			preview_endpoint = _branch_endpoint(target) if is_instance_valid(conveyor_branch_source) else _snap_conveyor_point(target, false)
 			var delta := preview_endpoint - conveyor_start
 			delta.y = 0.0
 			var length := delta.length()
@@ -1140,9 +1263,22 @@ func _update_build_preview() -> void:
 			check_position = preview_position + Vector3(0, 0.12, 0)
 			cost = ceili(length / 2.4) * 10
 		else:
-			preview_endpoint = _snap_conveyor_point(target, true)
+			var branch_attachment := _find_branch_attachment(target)
+			if not branch_attachment.is_empty():
+				preview_branch_source = branch_attachment["belt"]
+				preview_endpoint = branch_attachment["anchor"]
+			else:
+				preview_branch_source = null
+				preview_endpoint = _snap_conveyor_point(target, true)
 			preview_position = Vector3(preview_endpoint.x, 0.15, preview_endpoint.z)
-			preview_yaw = player.rotation.y
+			if is_instance_valid(preview_branch_source):
+				var source_direction := (preview_branch_source.get_meta("direction") as Vector3).normalized()
+				var side := source_direction.rotated(Vector3.UP, PI * 0.5)
+				var player_forward := -player.camera.global_transform.basis.z
+				var branch_direction := side if player_forward.dot(side) >= player_forward.dot(-side) else -side
+				preview_yaw = atan2(-branch_direction.x, -branch_direction.z)
+			else:
+				preview_yaw = player.rotation.y
 			build_preview.position = preview_position
 			build_preview.rotation = Vector3(0, preview_yaw, 0)
 			build_preview.scale = Vector3(1, 1, 1)
@@ -1354,8 +1490,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				if not conveyor_start_set:
 					conveyor_start = preview_endpoint
 					conveyor_start_set = true
+					conveyor_branch_source = preview_branch_source if is_instance_valid(preview_branch_source) else null
+					conveyor_branch_anchor = preview_endpoint
 					if hud_status:
-						hud_status.text = "Conveyor start set - aim elsewhere and click to finish."
+						hud_status.text = "Straight start set - branch will meet the belt at 90 degrees." if is_instance_valid(conveyor_branch_source) else "Conveyor start set - aim elsewhere and click to finish."
 					return
 				var direction := preview_endpoint - conveyor_start
 				direction.y = 0.0
@@ -1363,10 +1501,25 @@ func _unhandled_input(event: InputEvent) -> void:
 				var segment_count := maxi(1, ceili(distance / 2.4))
 				var segment_length := distance / float(segment_count)
 				var belt_yaw := atan2(-direction.x, -direction.z)
+				var splitter: Node3D = null
+				if is_instance_valid(conveyor_branch_source):
+					var branch_direction := direction.normalized()
+					splitter = _split_belt_for_branch(conveyor_branch_source, conveyor_branch_anchor, branch_direction)
+					if splitter == null:
+						_update_status("Could not split this belt at the selected point.")
+						return
+				var branch_belt: Node3D = null
 				for index in range(segment_count):
 					var segment_pos := conveyor_start + direction * ((float(index) + 0.5) / float(segment_count))
-					add_conveyor(segment_pos, belt_yaw, segment_length)
+					var placed_belt := add_conveyor(segment_pos, belt_yaw, segment_length)
+					if index == 0:
+						branch_belt = placed_belt
+				if splitter != null and is_instance_valid(branch_belt):
+					var output_belts: Array = splitter.get_meta("output_belts", [])
+					output_belts.append(branch_belt)
+					splitter.set_meta("output_belts", output_belts)
 				conveyor_start_set = false
+				conveyor_branch_source = null
 			else:
 				place_building(selected_building, preview_position)
 			if hud_status:
