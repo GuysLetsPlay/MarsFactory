@@ -5,8 +5,20 @@ const PORT := 24560
 const MAX_PLAYERS := 8
 var players: Dictionary = {}
 var status_label: Label
+var money := 1000
+var dust := 0
+var compacted_dust := 0
+var selected_building := ""
+var machine_timer := 0.0
+var balance_label: Label
+var production_label: Label
+var settings_panel: PanelContainer
+var remap_action := ""
+var restoring_save := false
+var key_labels := {"move_forward": "W", "move_back": "S", "move_left": "A", "move_right": "D", "jump": "Space"}
 
 func _ready() -> void:
+	_setup_inputs()
 	_build_world()
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -16,6 +28,32 @@ func _ready() -> void:
 	_spawn_player(multiplayer.get_unique_id())
 	_build_hud()
 	_build_network_menu()
+	_update_economy_ui()
+
+func _process(delta: float) -> void:
+	machine_timer += delta
+	if machine_timer >= 1.0:
+		machine_timer -= 1.0
+		var extractors := get_tree().get_nodes_in_group("dust_extractors")
+		dust += extractors.size()
+		var presses := get_tree().get_nodes_in_group("dust_presses")
+		for _press in presses:
+			if dust >= 2:
+				dust -= 2
+				compacted_dust += 1
+		_update_economy_ui()
+
+func _setup_inputs() -> void:
+	var bindings := {"move_forward": KEY_W, "move_back": KEY_S, "move_left": KEY_A, "move_right": KEY_D, "jump": KEY_SPACE}
+	var config := ConfigFile.new()
+	var config_status := config.load("user://settings.cfg")
+	for action in bindings:
+		if not InputMap.has_action(action):
+			InputMap.add_action(action)
+		InputMap.action_erase_events(action)
+		var event := InputEventKey.new()
+		event.physical_keycode = int(config.get_value("controls", action, bindings[action])) if config_status == OK else bindings[action]
+		InputMap.action_add_event(action, event)
 
 func _build_world() -> void:
 	var world_env := WorldEnvironment.new()
@@ -149,6 +187,38 @@ func add_conveyor(pos: Vector3, yaw: float) -> void:
 		belt.add_child(roller)
 	add_child(belt)
 
+func place_building(kind: String, pos: Vector3) -> void:
+	var cost := 150 if kind == "Staubförderer" else 250
+	if not restoring_save and money < cost:
+		_update_status("Nicht genug Geld für %s. Benötigt: %d cr." % [kind, cost])
+		return
+	if not restoring_save:
+		money -= cost
+	var body := StaticBody3D.new()
+	body.name = kind
+	body.position = Vector3(round(pos.x / 2.0) * 2.0, 1.0, round(pos.z / 2.0) * 2.0)
+	var mesh_instance := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(2.0, 2.0, 2.0)
+	mesh_instance.mesh = mesh
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.82, 0.43, 0.18) if kind == "Staubförderer" else Color(0.45, 0.58, 0.64)
+	material.metallic = 0.35
+	mesh_instance.material_override = material
+	body.add_child(mesh_instance)
+	var collision := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = mesh.size
+	collision.shape = box
+	body.add_child(collision)
+	if kind == "Staubförderer":
+		body.add_to_group("dust_extractors")
+	else:
+		body.add_to_group("dust_presses")
+	add_child(body)
+	selected_building = ""
+	_update_economy_ui()
+
 func mine_rock(rock: Node3D) -> void:
 	if is_instance_valid(rock) and rock.name.begins_with("OreRock"):
 		rock.queue_free()
@@ -251,13 +321,13 @@ func _build_hud() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
 	var title := Label.new()
-	title.text = "MARS OUTPOST  /  SECTOR 01"
+	title.text = "UPDATE 8 · STAUBFABRIK"
 	title.position = Vector2(24, 20)
 	title.add_theme_font_size_override("font_size", 20)
 	title.add_theme_color_override("font_color", Color(1.0, 0.78, 0.59))
 	layer.add_child(title)
 	var hint := Label.new()
-	hint.text = "WASD bewegen   •   Maus umsehen   •   Leertaste springen   •   ESC Maus freigeben"
+	hint.text = "WASD bewegen · Space springen · E abbauen · Baumenü links · ESC Maus fangen/freigeben"
 	hint.position = Vector2(24, 58)
 	hint.add_theme_font_size_override("font_size", 16)
 	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.88))
@@ -269,4 +339,124 @@ func _build_hud() -> void:
 	cross.add_theme_font_size_override("font_size", 26)
 	cross.add_theme_color_override("font_color", Color(1, 0.86, 0.7, 0.8))
 	layer.add_child(cross)
+	var panel := PanelContainer.new()
+	panel.position = Vector2(24, 112)
+	panel.custom_minimum_size = Vector2(230, 200)
+	layer.add_child(panel)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 5)
+	panel.add_child(column)
+	var heading := Label.new()
+	heading.text = "GEBÄUDE"
+	column.add_child(heading)
+	var extractor := Button.new()
+	extractor.text = "Staubförderer · 150 cr"
+	extractor.pressed.connect(func(): selected_building = "Staubförderer"; _update_status("Staubförderer gewählt: auf den Boden klicken zum Platzieren."))
+	column.add_child(extractor)
+	var press := Button.new()
+	press.text = "Staubpresse · 250 cr"
+	press.pressed.connect(func(): selected_building = "Staubpresse"; _update_status("Staubpresse gewählt: auf den Boden klicken zum Platzieren."))
+	column.add_child(press)
+	balance_label = Label.new()
+	column.add_child(balance_label)
+	production_label = Label.new()
+	column.add_child(production_label)
+	var settings_button := Button.new()
+	settings_button.text = "Einstellungen / Speichern"
+	settings_button.pressed.connect(_toggle_settings)
+	column.add_child(settings_button)
+	_build_settings(layer)
+
+func _update_economy_ui() -> void:
+	if is_instance_valid(balance_label):
+		balance_label.text = "Kontostand: %d cr" % money
+	if is_instance_valid(production_label):
+		production_label.text = "Staub: %d · gepresst: %d" % [dust, compacted_dust]
+
+func _build_settings(layer: CanvasLayer) -> void:
+	settings_panel = PanelContainer.new()
+	settings_panel.position = Vector2(280, 112)
+	settings_panel.custom_minimum_size = Vector2(320, 300)
+	settings_panel.visible = false
+	layer.add_child(settings_panel)
+	var column := VBoxContainer.new()
+	settings_panel.add_child(column)
+	var heading := Label.new()
+	heading.text = "EINSTELLUNGEN · TASTEN"
+	column.add_child(heading)
+	for action in ["move_forward", "move_back", "move_left", "move_right", "jump"]:
+		var button := Button.new()
+		button.text = "%s: %s (ändern)" % [action, key_labels[action]]
+		button.pressed.connect(func(): remap_action = action; button.text = "Taste für %s drücken …" % action)
+		column.add_child(button)
+	var save_button := Button.new()
+	save_button.text = "Spiel speichern"
+	save_button.pressed.connect(save_game)
+	column.add_child(save_button)
+	var load_button := Button.new()
+	load_button.text = "Spiel laden"
+	load_button.pressed.connect(load_game)
+	column.add_child(load_button)
+	var close_button := Button.new()
+	close_button.text = "Schließen"
+	close_button.pressed.connect(_toggle_settings)
+	column.add_child(close_button)
+
+func _toggle_settings() -> void:
+	settings_panel.visible = not settings_panel.visible
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if settings_panel.visible else Input.MOUSE_MODE_CAPTURED
+
+func _unhandled_input(event: InputEvent) -> void:
+	if remap_action != "" and event is InputEventKey and event.pressed:
+		InputMap.action_erase_events(remap_action)
+		var key_event := InputEventKey.new()
+		key_event.physical_keycode = event.physical_keycode
+		InputMap.action_add_event(remap_action, key_event)
+		key_labels[remap_action] = OS.get_keycode_string(event.keycode)
+		var config := ConfigFile.new()
+		config.load("user://settings.cfg")
+		config.set_value("controls", remap_action, event.physical_keycode)
+		config.save("user://settings.cfg")
+		remap_action = ""
+		return
+	if selected_building != "" and event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		var player = players.get(multiplayer.get_unique_id())
+		if player and player.camera:
+			var origin: Vector3 = player.camera.global_position
+			var end: Vector3 = origin + -player.camera.global_transform.basis.z * 12.0
+			var query := PhysicsRayQueryParameters3D.create(origin, end)
+			query.exclude = [player]
+			var hit := get_world_3d().direct_space_state.intersect_ray(query)
+			if hit.has("position"):
+				place_building(selected_building, hit["position"])
+
+func save_game() -> void:
+	var data := {"money": money, "dust": dust, "compacted_dust": compacted_dust, "buildings": []}
+	for group_name in ["dust_extractors", "dust_presses"]:
+		for building in get_tree().get_nodes_in_group(group_name):
+			data["buildings"].append({"type": building.name, "position": [building.position.x, building.position.y, building.position.z]})
+	var file := FileAccess.open("user://savegame.json", FileAccess.WRITE)
+	file.store_string(JSON.stringify(data))
+	_update_status("Spiel gespeichert.")
+
+func load_game() -> void:
+	if not FileAccess.file_exists("user://savegame.json"):
+		_update_status("Kein Spielstand gefunden.")
+		return
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string("user://savegame.json"))
+	if typeof(parsed) != TYPE_DICTIONARY:
+		_update_status("Spielstand ist beschädigt.")
+		return
+	for group_name in ["dust_extractors", "dust_presses"]:
+		for building in get_tree().get_nodes_in_group(group_name):
+			building.queue_free()
+	money = int(parsed.get("money", 1000))
+	dust = int(parsed.get("dust", 0))
+	compacted_dust = int(parsed.get("compacted_dust", 0))
+	restoring_save = true
+	for saved in parsed.get("buildings", []):
+		place_building(str(saved["type"]), Vector3(saved["position"][0], 0, saved["position"][2]))
+	restoring_save = false
+	_update_economy_ui()
+	_update_status("Spielstand geladen.")
 
