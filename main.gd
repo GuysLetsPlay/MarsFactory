@@ -321,7 +321,7 @@ func _build_hud() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
 	var title := Label.new()
-	title.text = "UPDATE 8 · STAUBFABRIK"
+	title.text = "UPDATE 9 · STAUBFABRIK"
 	title.position = Vector2(24, 20)
 	title.add_theme_font_size_override("font_size", 20)
 	title.add_theme_color_override("font_color", Color(1.0, 0.78, 0.59))
@@ -459,4 +459,5 @@ func load_game() -> void:
 	restoring_save = false
 	_update_economy_ui()
 	_update_status("Spielstand geladen.")
+
 
