@@ -12,6 +12,10 @@ var selected_building := ""
 var machine_timer := 0.0
 var extractor_timers: Dictionary = {}
 var conveyor_items: Array[Dictionary] = []
+var flow_events: Array[Dictionary] = []
+var machine_upgrade_level := 0
+var belt_upgrade_level := 0
+var pressed_yield_remainder := 0.0
 var balance_label: Label
 var production_label: Label
 var settings_panel: PanelContainer
@@ -20,6 +24,13 @@ var pause_panel: PanelContainer
 var build_overlay: ColorRect
 var build_panel: PanelContainer
 var network_overlay: ColorRect
+var building_overlay: ColorRect
+var building_info: Label
+var focused_building: Node3D
+var upgrade_machine_button: Button
+var upgrade_belt_button: Button
+var dismantle_button: Button
+var belt_stats_label: Label
 var hud_status: Label
 var remap_action := ""
 var restoring_save := false
@@ -46,6 +57,7 @@ func _ready() -> void:
 	_build_build_menu()
 	_build_network_menu()
 	_build_pause_menu()
+	_build_building_ui()
 	_update_economy_ui()
 
 func _process(delta: float) -> void:
@@ -53,6 +65,15 @@ func _process(delta: float) -> void:
 		return
 	_update_build_preview()
 	_simulate_conveyor_factory(delta)
+	machine_timer += delta
+	if machine_timer >= 5.0:
+		machine_timer = 0.0
+		var now := Time.get_ticks_msec() / 1000.0
+		var recent_events: Array[Dictionary] = []
+		for event in flow_events:
+			if now - float(event["time"]) <= 60.0:
+				recent_events.append(event)
+		flow_events = recent_events
 
 func _setup_inputs() -> void:
 	var bindings := {"move_forward": KEY_W, "move_back": KEY_S, "move_left": KEY_A, "move_right": KEY_D, "jump": KEY_SPACE}
@@ -246,6 +267,44 @@ func _belt_entry(belt: Node3D) -> Vector3:
 func _belt_exit(belt: Node3D) -> Vector3:
 	return belt.global_position + (belt.get_meta("direction") as Vector3) * float(belt.get_meta("length")) * 0.5
 
+func _extractor_outlet(extractor: Node3D) -> Vector3:
+	return extractor.global_position + Vector3(0, -0.70, -1.0)
+
+func _press_intake(press: Node3D) -> Vector3:
+	return press.global_position + Vector3(0, -0.72, 1.25)
+
+func _snap_conveyor_point(raw_point: Vector3, is_start: bool) -> Vector3:
+	var candidates: Array[Vector3] = []
+	for node in get_tree().get_nodes_in_group("conveyor_segments"):
+		var belt := node as Node3D
+		candidates.append(_belt_exit(belt) if is_start else _belt_entry(belt))
+	if is_start:
+		for node in get_tree().get_nodes_in_group("dust_extractors"):
+			candidates.append(_extractor_outlet(node))
+	else:
+		for node in get_tree().get_nodes_in_group("dust_presses"):
+			candidates.append(_press_intake(node))
+	var best := Vector3(round(raw_point.x), 0.0, round(raw_point.z))
+	var best_distance := 2.6
+	for candidate in candidates:
+		var distance := Vector2(candidate.x - raw_point.x, candidate.z - raw_point.z).length()
+		if distance < best_distance:
+			best = Vector3(candidate.x, 0.0, candidate.z)
+			best_distance = distance
+	return best
+
+func _is_allowed_conveyor_overlap(collider: Object, start: Vector3, finish: Vector3) -> bool:
+	if not collider is Node:
+		return false
+	var node := collider as Node
+	if node.is_in_group("conveyor_segments"):
+		return true
+	if node.is_in_group("dust_extractors"):
+		return Vector2(node.global_position.x - start.x, node.global_position.z - start.z).length() < 2.8
+	if node.is_in_group("dust_presses"):
+		return Vector2(node.global_position.x - finish.x, node.global_position.z - finish.z).length() < 2.8
+	return false
+
 func _find_belt_at_entry(point: Vector3, excluded: Node = null) -> Node3D:
 	var closest: Node3D = null
 	var best_distance := 2.0
@@ -259,7 +318,20 @@ func _find_belt_at_entry(point: Vector3, excluded: Node = null) -> Node3D:
 			closest = belt
 	return closest
 
-func _spawn_dust_item(belt: Node3D) -> void:
+func _find_belt_exiting_at(point: Vector3, excluded: Node = null) -> Node3D:
+	var closest: Node3D = null
+	var best_distance := 2.0
+	for node in get_tree().get_nodes_in_group("conveyor_segments"):
+		if node == excluded:
+			continue
+		var belt := node as Node3D
+		var distance := _belt_exit(belt).distance_to(point)
+		if distance < best_distance:
+			best_distance = distance
+			closest = belt
+	return closest
+
+func _spawn_dust_item(belt: Node3D, extractor: Node3D) -> void:
 	var item := MeshInstance3D.new()
 	var mesh := SphereMesh.new()
 	mesh.radius = 0.17
@@ -273,6 +345,7 @@ func _spawn_dust_item(belt: Node3D) -> void:
 	var entry := _belt_entry(belt)
 	item.global_position = entry + Vector3(0, 0.36, 0)
 	conveyor_items.append({"visual": item, "belt": belt, "progress": 0.0})
+	flow_events.append({"time": Time.get_ticks_msec() / 1000.0, "building": extractor.get_instance_id()})
 	dust += 1
 	_update_economy_ui()
 
@@ -298,8 +371,8 @@ func _simulate_conveyor_factory(delta: float) -> void:
 			var outlet: Vector3 = extractor.global_position + Vector3(0, -0.70, -1.0)
 			var belt := _find_belt_at_entry(outlet)
 			if belt != null and conveyor_items.size() < 40:
-				_spawn_dust_item(belt)
-				remaining = 2.0
+				_spawn_dust_item(belt, extractor)
+				remaining = 2.0 / (1.0 + 0.5 * float(machine_upgrade_level))
 			else:
 				remaining = 0.25
 		extractor_timers[instance_id] = remaining
@@ -310,20 +383,25 @@ func _simulate_conveyor_factory(delta: float) -> void:
 			_remove_conveyor_item(index)
 			continue
 		var belt_length := float(belt.get_meta("length"))
-		var progress := float(item.get("progress", 0.0)) + delta * 1.6 / belt_length
+		var progress := float(item.get("progress", 0.0)) + delta * _current_belt_speed() / belt_length
 		if progress >= 1.0:
 			var exit_point := _belt_exit(belt)
 			var next_belt := _find_belt_at_entry(exit_point, belt)
 			if next_belt != null:
 				item["belt"] = next_belt
 				progress = 0.0
-			elif _find_press_at(exit_point) != null:
-				compacted_dust += 1
-				dust = maxi(0, dust - 1)
-				_remove_conveyor_item(index)
-				_update_economy_ui()
-				continue
 			else:
+				var receiving_press := _find_press_at(exit_point)
+				if receiving_press != null:
+					flow_events.append({"time": Time.get_ticks_msec() / 1000.0, "building": receiving_press.get_instance_id()})
+					pressed_yield_remainder += 1.0 + 0.5 * float(machine_upgrade_level)
+					var produced := int(floor(pressed_yield_remainder))
+					pressed_yield_remainder -= float(produced)
+					compacted_dust += produced
+					dust = maxi(0, dust - 1)
+					_remove_conveyor_item(index)
+					_update_economy_ui()
+					continue
 				progress = 1.0
 		item["progress"] = progress
 		conveyor_items[index] = item
@@ -332,7 +410,7 @@ func _simulate_conveyor_factory(delta: float) -> void:
 		(item["visual"] as Node3D).global_position = entry.lerp(exit, progress) + Vector3(0, 0.36, 0)
 
 func place_building(kind: String, pos: Vector3) -> void:
-	var cost := 150 if kind.begins_with("Staubf") else 250
+	var cost := 150 if kind.begins_with("Staubf") else (250 if kind == "Staubpresse" else 500)
 	if not restoring_save and money < cost:
 		_update_status("Nicht genug Geld für %s. Benötigt: %d cr." % [kind, cost])
 		return
@@ -351,15 +429,18 @@ func place_building(kind: String, pos: Vector3) -> void:
 	body.add_child(collision)
 	if kind.begins_with("Staubf"):
 		body.add_to_group("dust_extractors")
-	else:
+	elif kind == "Staubpresse":
 		body.add_to_group("dust_presses")
+	else:
+		body.add_to_group("upgrade_stations")
 	add_child(body)
 	selected_building = ""
 	_update_economy_ui()
 
 func _build_machine_model(parent: Node3D, kind: String) -> void:
 	var extractor := kind == "Staubfoerderer"
-	var shell_color := Color(0.72, 0.29, 0.12) if extractor else Color(0.24, 0.37, 0.43)
+	var upgrade_station := kind == "UpgradeStation"
+	var shell_color := Color(0.72, 0.29, 0.12) if extractor else (Color(0.35, 0.25, 0.58) if upgrade_station else Color(0.24, 0.37, 0.43))
 	var steel := Color(0.46, 0.58, 0.62)
 	var dark := Color(0.10, 0.15, 0.18)
 	_add_machine_box(parent, Vector3(0, -0.78, 0), Vector3(2.15, 0.30, 2.15), dark)
@@ -379,6 +460,11 @@ func _build_machine_model(parent: Node3D, kind: String) -> void:
 		_add_machine_box(parent, Vector3(0, -0.55, -0.35), Vector3(1.25, 0.24, 0.22), steel)
 		for x in [-0.42, 0.42]:
 			_add_machine_cylinder(parent, Vector3(x, -0.69, 0.62), 0.16, 0.42, steel)
+	elif upgrade_station:
+		_add_machine_box(parent, Vector3(0, 0.86, 0), Vector3(1.36, 0.42, 0.16), Color(0.13, 0.79, 0.91))
+		_add_machine_cylinder(parent, Vector3(0, 1.20, 0), 0.14, 0.48, steel)
+		_add_machine_box(parent, Vector3(0, 0.10, 0.87), Vector3(1.12, 0.72, 0.10), Color(0.08, 0.13, 0.18))
+		_add_machine_box(parent, Vector3(0, 0.10, 0.94), Vector3(0.82, 0.46, 0.035), Color(0.15, 0.85, 0.89), lamp_material)
 	else:
 		_add_machine_cylinder(parent, Vector3(0, 1.04, 0), 0.30, 0.62, steel)
 		_add_machine_box(parent, Vector3(0, 0.72, 0), Vector3(1.28, 0.14, 1.15), shell_color)
@@ -550,7 +636,7 @@ func _build_hud() -> void:
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(title)
 	var hint := Label.new()
-	hint.text = "WASD move  |  E mine  |  B build menu  |  ESC pause"
+	hint.text = "WASD move  |  E use building  |  X dismantle  |  B build menu  |  ESC pause"
 	hint.position = Vector2(24, 55)
 	hint.add_theme_font_size_override("font_size", 15)
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -615,10 +701,176 @@ func _build_build_menu() -> void:
 	desc.text = "Choose a building, then click the ground to place it."
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	column.add_child(desc)
+	belt_stats_label = Label.new()
+	belt_stats_label.text = "Conveyor speed: %.2f m/s  |  Auto-connect at snapped ends" % _current_belt_speed()
+	belt_stats_label.add_theme_color_override("font_color", Color(0.58, 0.78, 0.80))
+	column.add_child(belt_stats_label)
 	_add_menu_button(column, "Dust extractor  |  150 cr", func(): _select_building("Staubfoerderer"), true)
 	_add_menu_button(column, "Dust press  |  250 cr", func(): _select_building("Staubpresse"), false)
+	_add_menu_button(column, "Upgrade station  |  500 cr", func(): _select_building("UpgradeStation"), false)
 	_add_menu_button(column, "Conveyor  |  10 cr", func(): _select_building("Foerderband"), false)
 	_add_menu_button(column, "Close  |  B / ESC", _close_build_menu, false)
+
+func _build_building_ui() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 40
+	add_child(layer)
+	building_overlay = ColorRect.new()
+	building_overlay.color = Color(0.015, 0.035, 0.055, 0.80)
+	building_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	building_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	building_overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	building_overlay.visible = false
+	layer.add_child(building_overlay)
+	var panel := PanelContainer.new()
+	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	panel.offset_left = -260
+	panel.offset_top = -175
+	panel.offset_right = 260
+	panel.offset_bottom = 175
+	panel.add_theme_stylebox_override("panel", _menu_style(Color(0.045, 0.075, 0.105, 0.99), Color(0.25, 0.74, 0.82)))
+	building_overlay.add_child(panel)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 14)
+	panel.add_child(column)
+	var overline := Label.new()
+	overline.text = "MARS INDUSTRIES  /  BUILDING STATUS"
+	overline.add_theme_color_override("font_color", Color(0.39, 0.78, 0.83))
+	column.add_child(overline)
+	var heading := Label.new()
+	heading.text = "Building"
+	heading.add_theme_font_size_override("font_size", 28)
+	heading.add_theme_color_override("font_color", Color(1.0, 0.89, 0.75))
+	column.add_child(heading)
+	building_info = Label.new()
+	building_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	building_info.custom_minimum_size = Vector2(440, 100)
+	column.add_child(building_info)
+	upgrade_machine_button = Button.new()
+	upgrade_machine_button.custom_minimum_size = Vector2(0, 44)
+	upgrade_machine_button.pressed.connect(_upgrade_machine_efficiency)
+	upgrade_machine_button.visible = false
+	column.add_child(upgrade_machine_button)
+	upgrade_belt_button = Button.new()
+	upgrade_belt_button.custom_minimum_size = Vector2(0, 44)
+	upgrade_belt_button.pressed.connect(_upgrade_conveyor_speed)
+	upgrade_belt_button.visible = false
+	column.add_child(upgrade_belt_button)
+	dismantle_button = Button.new()
+	dismantle_button.custom_minimum_size = Vector2(0, 44)
+	dismantle_button.pressed.connect(_dismantle_focused_building)
+	column.add_child(dismantle_button)
+	_add_menu_button(column, "Close  |  E / ESC", _close_building_ui, true)
+
+func interact_with_aim(camera: Camera3D) -> void:
+	var origin := camera.global_position
+	var ray := PhysicsRayQueryParameters3D.create(origin, origin - camera.global_transform.basis.z * 5.0)
+	var hit := get_world_3d().direct_space_state.intersect_ray(ray)
+	if not hit.has("collider"):
+		return
+	var target = hit["collider"]
+	if target is Node and target.is_in_group("buildable"):
+		_open_building_ui(target)
+	elif target is Node3D and target.name.begins_with("OreRock"):
+		mine_rock(target)
+
+func dismantle_with_aim(camera: Camera3D) -> void:
+	if get_tree().paused:
+		return
+	var origin := camera.global_position
+	var ray := PhysicsRayQueryParameters3D.create(origin, origin - camera.global_transform.basis.z * 5.0)
+	var hit := get_world_3d().direct_space_state.intersect_ray(ray)
+	if hit.has("collider"):
+		var target = hit["collider"]
+		if target is Node3D and target.is_in_group("buildable"):
+			_dismantle_building(target)
+
+func _dismantle_focused_building() -> void:
+	if is_instance_valid(focused_building):
+		_dismantle_building(focused_building)
+
+func _dismantle_building(building: Node3D) -> void:
+	if not is_instance_valid(building):
+		return
+	var kind := str(building.get_meta("building_kind", building.name))
+	var refund := 5 if kind == "Foerderband" else (75 if kind == "Staubfoerderer" else (125 if kind == "Staubpresse" else 250))
+	var building_id := building.get_instance_id()
+	if kind == "Foerderband":
+		for index in range(conveyor_items.size() - 1, -1, -1):
+			if conveyor_items[index].get("belt") == building:
+				_remove_conveyor_item(index)
+	extractor_timers.erase(building_id)
+	if focused_building == building:
+		_close_building_ui()
+	building.queue_free()
+	money += refund
+	_update_economy_ui()
+	_update_status("Dismantled %s. Refund: %d cr." % [kind, refund])
+
+func _open_building_ui(building: Node3D) -> void:
+	focused_building = building
+	var kind := str(building.get_meta("building_kind", building.name))
+	var throughput := 0
+	var now := Time.get_ticks_msec() / 1000.0
+	for event in flow_events:
+		if int(event["building"]) == building.get_instance_id() and now - float(event["time"]) <= 60.0:
+			throughput += 1
+	var info := ""
+	if kind == "Staubfoerderer":
+		var connected := _find_belt_at_entry(_extractor_outlet(building)) != null
+		info = "Status: %s\nOutput: %d items/min (last 60 seconds)\nOutput belt: %s" % ["Running" if connected else "Waiting for conveyor", throughput, "Connected" if connected else "Not connected"]
+	elif kind == "Staubpresse":
+		var connected := false
+		for belt in get_tree().get_nodes_in_group("conveyor_segments"):
+			if _belt_exit(belt).distance_to(_press_intake(building)) < 2.6:
+				connected = true
+				break
+		info = "Status: %s\nInput: %d items/min (last 60 seconds)\nBelt speed: %.2f m/s\nPressed dust: %d" % ["Processing" if connected else "Waiting for conveyor", throughput, _current_belt_speed(), compacted_dust]
+	elif kind == "Foerderband":
+		var connected_forward := _find_belt_at_entry(_belt_exit(building), building) != null
+		var connected_from := _find_belt_exiting_at(_belt_entry(building), building) != null
+		info = "Belt speed: %.2f m/s\nFlow: 2.4 m per segment\nConnected from previous belt: %s\nConnected to next belt: %s" % [_current_belt_speed(), "Yes" if connected_from else "No", "Yes" if connected_forward else "No"]
+	else:
+		info = "Upgrade station\nMachine efficiency: level %d (%.1f items per dust)\nConveyor speed: %.2f m/s\nUpgrades affect all placed machines and belts." % [machine_upgrade_level, 1.0 + 0.5 * float(machine_upgrade_level), _current_belt_speed()]
+	building_info.text = info
+	building_info.text += "\nPress X to dismantle for a partial refund."
+	var is_upgrade_station := kind == "UpgradeStation"
+	upgrade_machine_button.visible = is_upgrade_station and machine_upgrade_level < 3
+	upgrade_belt_button.visible = is_upgrade_station and belt_upgrade_level < 3
+	if upgrade_machine_button.visible:
+		upgrade_machine_button.text = "Machine efficiency +50%%  |  %d cr" % (250 * (machine_upgrade_level + 1))
+	if upgrade_belt_button.visible:
+		upgrade_belt_button.text = "Conveyor speed +35%%  |  %d cr" % (250 * (belt_upgrade_level + 1))
+	dismantle_button.text = "Dismantle  |  X  |  Refund %d cr" % (5 if kind == "Foerderband" else (75 if kind == "Staubfoerderer" else (125 if kind == "Staubpresse" else 250)))
+	building_overlay.visible = true
+	get_tree().paused = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+func _close_building_ui() -> void:
+	building_overlay.visible = false
+	focused_building = null
+	get_tree().paused = false
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func _upgrade_machine_efficiency() -> void:
+	var cost := 250 * (machine_upgrade_level + 1)
+	if money < cost or machine_upgrade_level >= 3:
+		_update_status("Not enough credits or maximum upgrade reached.")
+		return
+	money -= cost
+	machine_upgrade_level += 1
+	_update_economy_ui()
+	_open_building_ui(focused_building)
+
+func _upgrade_conveyor_speed() -> void:
+	var cost := 250 * (belt_upgrade_level + 1)
+	if money < cost or belt_upgrade_level >= 3:
+		_update_status("Not enough credits or maximum upgrade reached.")
+		return
+	money -= cost
+	belt_upgrade_level += 1
+	_update_economy_ui()
+	_open_building_ui(focused_building)
 
 func _select_building(kind: String) -> void:
 	selected_building = kind
@@ -723,10 +975,10 @@ func _update_build_preview() -> void:
 	var target: Vector3 = hit["position"]
 	var check_size: Vector3
 	var check_position: Vector3
-	var cost := 150 if selected_building == "Staubfoerderer" else (250 if selected_building == "Staubpresse" else 10)
+	var cost := 150 if selected_building == "Staubfoerderer" else (250 if selected_building == "Staubpresse" else (500 if selected_building == "UpgradeStation" else 10))
 	if selected_building == "Foerderband":
 		if conveyor_start_set:
-			preview_endpoint = Vector3(round(target.x), 0.0, round(target.z))
+			preview_endpoint = _snap_conveyor_point(target, false)
 			var delta := preview_endpoint - conveyor_start
 			delta.y = 0.0
 			var length := delta.length()
@@ -745,8 +997,8 @@ func _update_build_preview() -> void:
 			check_position = preview_position + Vector3(0, 0.12, 0)
 			cost = ceili(length / 2.4) * 10
 		else:
-			preview_position = Vector3(round(target.x), 0.15, round(target.z))
-			preview_endpoint = Vector3(preview_position.x, 0.0, preview_position.z)
+			preview_endpoint = _snap_conveyor_point(target, true)
+			preview_position = Vector3(preview_endpoint.x, 0.15, preview_endpoint.z)
 			preview_yaw = player.rotation.y
 			build_preview.position = preview_position
 			build_preview.rotation = Vector3(0, preview_yaw, 0)
@@ -769,7 +1021,15 @@ func _update_build_preview() -> void:
 	query.exclude = [player.get_rid()]
 	query.collide_with_areas = false
 	var overlaps := get_world_3d().direct_space_state.intersect_shape(query, 12)
-	preview_valid = overlaps.is_empty() and money >= cost
+	var blocked := false
+	if selected_building == "Foerderband":
+		for overlap in overlaps:
+			if not _is_allowed_conveyor_overlap(overlap.get("collider"), conveyor_start if conveyor_start_set else preview_endpoint, preview_endpoint):
+				blocked = true
+				break
+	else:
+		blocked = not overlaps.is_empty()
+	preview_valid = not blocked and money >= cost
 	_set_preview_tint(build_preview, Color(0.25, 1.0, 0.48, 0.42) if preview_valid else Color(1.0, 0.22, 0.18, 0.48))
 	build_preview.visible = true
 func _update_economy_ui() -> void:
@@ -778,6 +1038,11 @@ func _update_economy_ui() -> void:
 	if is_instance_valid(production_label):
 		production_label.text = "Staub: %d · gepresst: %d" % [dust, compacted_dust]
 
+	if is_instance_valid(belt_stats_label):
+		belt_stats_label.text = "Conveyor speed: %.2f m/s  |  Auto-connect at snapped ends" % _current_belt_speed()
+
+func _current_belt_speed() -> float:
+	return 1.6 * pow(1.35, belt_upgrade_level)
 func _build_settings(layer: CanvasLayer) -> void:
 	settings_panel = PanelContainer.new()
 	settings_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
@@ -889,6 +1154,9 @@ func _add_menu_button(parent: VBoxContainer, caption: String, action: Callable, 
 	parent.add_child(button)
 
 func toggle_pause_menu() -> void:
+	if building_overlay.visible:
+		_close_building_ui()
+		return
 	build_overlay.visible = false
 	network_overlay.visible = false
 	selected_building = ""
@@ -966,8 +1234,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_update_status("Invalid placement: surface is blocked or balance is too low.")
 
 func save_game() -> void:
-	var data := {"money": money, "dust": dust, "compacted_dust": compacted_dust, "buildings": []}
-	for group_name in ["dust_extractors", "dust_presses"]:
+	var data := {"money": money, "dust": dust, "compacted_dust": compacted_dust, "machine_upgrade_level": machine_upgrade_level, "belt_upgrade_level": belt_upgrade_level, "buildings": []}
+	for group_name in ["dust_extractors", "dust_presses", "upgrade_stations"]:
 		for building in get_tree().get_nodes_in_group(group_name):
 			data["buildings"].append({"type": building.name, "position": [building.position.x, building.position.y, building.position.z]})
 	var file := FileAccess.open("user://savegame.json", FileAccess.WRITE)
@@ -982,12 +1250,14 @@ func load_game() -> void:
 	if typeof(parsed) != TYPE_DICTIONARY:
 		_update_status("Spielstand ist beschädigt.")
 		return
-	for group_name in ["dust_extractors", "dust_presses"]:
+	for group_name in ["dust_extractors", "dust_presses", "upgrade_stations"]:
 		for building in get_tree().get_nodes_in_group(group_name):
 			building.queue_free()
 	money = int(parsed.get("money", 1000))
 	dust = int(parsed.get("dust", 0))
 	compacted_dust = int(parsed.get("compacted_dust", 0))
+	machine_upgrade_level = int(parsed.get("machine_upgrade_level", 0))
+	belt_upgrade_level = int(parsed.get("belt_upgrade_level", 0))
 	restoring_save = true
 	for saved in parsed.get("buildings", []):
 		place_building(str(saved["type"]), Vector3(saved["position"][0], 0, saved["position"][2]))

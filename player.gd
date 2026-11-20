@@ -62,6 +62,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_E:
 			_mine_target()
+		elif event.keycode == KEY_X:
+			get_parent().dismantle_with_aim(camera)
 		elif event.keycode == KEY_B:
 			get_parent().toggle_build_menu()
 			get_viewport().set_input_as_handled()
@@ -74,11 +76,7 @@ func _raycast_target() -> Dictionary:
 	return get_world_3d().direct_space_state.intersect_ray(query)
 
 func _mine_target() -> void:
-	var hit := _raycast_target()
-	if hit.has("collider"):
-		var collider = hit["collider"]
-		if collider is Node3D and collider.name.begins_with("OreRock"):
-			get_parent().mine_rock(collider)
+	get_parent().interact_with_aim(camera)
 
 func _place_belt() -> void:
 	var hit := _raycast_target()
