@@ -1281,7 +1281,7 @@ func toggle_build_menu() -> void:
 	_clear_build_preview()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if build_overlay.visible else Input.MOUSE_MODE_CAPTURED
 	if build_overlay.visible:
-		build_panel.get_child(0).get_child(3).grab_focus()
+		build_panel.get_child(0).get_child(4).grab_focus()
 
 func _create_build_preview() -> void:
 	_clear_build_preview()
