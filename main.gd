@@ -349,9 +349,9 @@ func _split_belt_for_branch(belt: Node3D, anchor: Vector3, branch_direction: Vec
 			item["progress"] = (distance - split_distance) / straight_length
 		conveyor_items[index] = item
 	var splitter := _create_splitter_visual(anchor, yaw, branch_direction)
-	splitter.set_meta("input_belt", input_belt)
-	splitter.set_meta("straight_belt", straight_belt)
-	splitter.set_meta("output_belts", [straight_belt])
+	splitter.set_meta("input_belt_id", input_belt.get_instance_id())
+	splitter.set_meta("straight_belt_id", straight_belt.get_instance_id())
+	splitter.set_meta("output_belt_ids", [straight_belt.get_instance_id()])
 	belt.queue_free()
 	return splitter
 
@@ -388,24 +388,31 @@ func _create_splitter_visual(anchor: Vector3, yaw: float, branch_direction: Vect
 
 func _find_splitter_for_input(belt: Node3D, exit_point: Vector3) -> Node3D:
 	for node in get_tree().get_nodes_in_group("splitter_visuals"):
+		if not is_instance_valid(node):
+			continue
 		var splitter := node as Node3D
-		if splitter.get_meta("input_belt", null) == belt and splitter.global_position.distance_to(exit_point) < 0.6:
+		if int(splitter.get_meta("input_belt_id", -1)) == belt.get_instance_id() and splitter.global_position.distance_to(exit_point) < 0.6:
 			return splitter
 	return null
 
+func _get_conveyor_by_id(instance_id: int) -> Node3D:
+	for node in get_tree().get_nodes_in_group("conveyor_segments"):
+		if is_instance_valid(node) and node.get_instance_id() == instance_id:
+			return node as Node3D
+	return null
+
 func _choose_splitter_output(splitter: Node3D) -> Node3D:
-	var outputs: Array = splitter.get_meta("output_belts", [])
-	if outputs.is_empty():
+	var output_ids: Array = splitter.get_meta("output_belt_ids", [])
+	if output_ids.is_empty():
 		return null
-	var next_index := int(splitter.get_meta("next_output", 0)) % outputs.size()
-	for offset in range(outputs.size()):
-		var index := (next_index + offset) % outputs.size()
-		var output = outputs[index]
-		if not is_instance_valid(output):
+	var next_index := int(splitter.get_meta("next_output", 0)) % output_ids.size()
+	for offset in range(output_ids.size()):
+		var index := (next_index + offset) % output_ids.size()
+		var belt := _get_conveyor_by_id(int(output_ids[index]))
+		if belt == null:
 			continue
-		var belt := output as Node3D
 		if _belt_has_space(belt, 0.0):
-			splitter.set_meta("next_output", (index + 1) % outputs.size())
+			splitter.set_meta("next_output", (index + 1) % output_ids.size())
 			return belt
 	return null
 
@@ -1124,11 +1131,9 @@ func _dismantle_building(building: Node3D) -> void:
 	_update_status("Dismantled %s. Refund: %d cr." % [kind, refund])
 
 func _dismantle_splitter(splitter: Node3D) -> void:
-	var input_value = splitter.get_meta("input_belt", null)
-	var straight_value = splitter.get_meta("straight_belt", null)
-	var input_belt: Node3D = input_value as Node3D if is_instance_valid(input_value) else null
-	var straight_belt: Node3D = straight_value as Node3D if is_instance_valid(straight_value) else null
-	var branch_belts: Array = splitter.get_meta("branch_belts", [])
+	var input_belt := _get_conveyor_by_id(int(splitter.get_meta("input_belt_id", -1)))
+	var straight_belt := _get_conveyor_by_id(int(splitter.get_meta("straight_belt_id", -1)))
+	var branch_belt_ids: Array = splitter.get_meta("branch_belt_ids", [])
 	var merged_belt: Node3D = null
 	if is_instance_valid(input_belt) and is_instance_valid(straight_belt):
 		var input_length := float(input_belt.get_meta("length"))
@@ -1151,8 +1156,9 @@ func _dismantle_splitter(splitter: Node3D) -> void:
 				conveyor_items[index] = item
 		input_belt.queue_free()
 		straight_belt.queue_free()
-	for branch_belt in branch_belts:
-		if not is_instance_valid(branch_belt):
+	for branch_belt_id in branch_belt_ids:
+		var branch_belt := _get_conveyor_by_id(int(branch_belt_id))
+		if branch_belt == null:
 			continue
 		for index in range(conveyor_items.size() - 1, -1, -1):
 			if conveyor_items[index].get("belt") == branch_belt:
@@ -1637,10 +1643,13 @@ func _unhandled_input(event: InputEvent) -> void:
 					if splitter != null and is_instance_valid(placed_belt):
 						branch_belts.append(placed_belt)
 				if splitter != null and is_instance_valid(branch_belt):
-					var output_belts: Array = splitter.get_meta("output_belts", [])
-					output_belts.append(branch_belt)
-					splitter.set_meta("output_belts", output_belts)
-					splitter.set_meta("branch_belts", branch_belts)
+					var output_belt_ids: Array = splitter.get_meta("output_belt_ids", [])
+					output_belt_ids.append(branch_belt.get_instance_id())
+					splitter.set_meta("output_belt_ids", output_belt_ids)
+					var branch_belt_ids: Array[int] = []
+					for branch_segment in branch_belts:
+						branch_belt_ids.append(branch_segment.get_instance_id())
+					splitter.set_meta("branch_belt_ids", branch_belt_ids)
 				conveyor_start_set = false
 				conveyor_branch_source = null
 				conveyor_start_direction = Vector3.ZERO
