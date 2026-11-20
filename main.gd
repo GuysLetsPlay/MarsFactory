@@ -3,6 +3,10 @@ extends Node3D
 const PLAYER_SCRIPT = preload("res://player.gd")
 const PORT := 24560
 const MAX_PLAYERS := 8
+const ITEM_GAP_M := 0.65
+const DUST_SELL_PRICE := 5
+const COMPACTED_DUST_SELL_PRICE := 30
+const SPACEPORT_FEE_RATE := 0.10
 var players: Dictionary = {}
 var status_label: Label
 var money := 1000
@@ -163,11 +167,58 @@ func _build_world() -> void:
 		peak.material_override = peak_mat
 		add_child(peak)
 
-	# A simple starter outpost visible ahead.
-	_add_box(Vector3(0, 1.5, -16), Vector3(7, 3, 5), Color(0.55, 0.58, 0.60))
-	_add_box(Vector3(-4.5, 1.0, -16), Vector3(2, 2, 2), Color(0.37, 0.52, 0.58))
-	_add_box(Vector3(4.5, 1.0, -16), Vector3(2, 2, 2), Color(0.37, 0.52, 0.58))
-	_add_box(Vector3(0, 3.3, -16), Vector3(3.2, 0.4, 2.5), Color(0.18, 0.48, 0.65))
+	_build_spaceport()
+
+func _build_spaceport() -> void:
+	var station := StaticBody3D.new()
+	station.name = "Spaceport"
+	station.position = Vector3(0, 0, -16)
+	station.add_to_group("sell_stations")
+	station.set_meta("building_kind", "Spaceport")
+	var shell := MeshInstance3D.new()
+	var shell_mesh := BoxMesh.new()
+	shell_mesh.size = Vector3(7, 3, 5)
+	shell.mesh = shell_mesh
+	shell.position.y = 1.5
+	var shell_material := StandardMaterial3D.new()
+	shell_material.albedo_color = Color(0.55, 0.58, 0.60)
+	shell_material.metallic = 0.45
+	shell_material.roughness = 0.42
+	shell.material_override = shell_material
+	station.add_child(shell)
+	var collision := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(7, 3, 5)
+	collision.shape = shape
+	collision.position.y = 1.5
+	station.add_child(collision)
+	for x in [-4.5, 4.5]:
+		var tower := MeshInstance3D.new()
+		var tower_mesh := BoxMesh.new()
+		tower_mesh.size = Vector3(2, 2, 2)
+		tower.mesh = tower_mesh
+		tower.position = Vector3(x, 1, 0)
+		var tower_material := StandardMaterial3D.new()
+		tower_material.albedo_color = Color(0.37, 0.52, 0.58)
+		tower_material.metallic = 0.55
+		tower.material_override = tower_material
+		station.add_child(tower)
+	var sign := MeshInstance3D.new()
+	var sign_mesh := BoxMesh.new()
+	sign_mesh.size = Vector3(3.2, 0.4, 2.5)
+	sign.mesh = sign_mesh
+	sign.position = Vector3(0, 3.3, 0)
+	var sign_material := StandardMaterial3D.new()
+	sign_material.albedo_color = Color(0.18, 0.48, 0.65)
+	sign_material.emission_enabled = true
+	sign_material.emission = Color(0.04, 0.18, 0.28)
+	sign.material_override = sign_material
+	station.add_child(sign)
+	# A brightly marked dock sits on the outpost's front side (+Z).
+	_add_machine_box(station, Vector3(0, 0.05, 3.55), Vector3(2.1, 0.10, 1.0), Color(0.18, 0.84, 0.76))
+	_add_machine_box(station, Vector3(-0.78, 0.20, 3.55), Vector3(0.10, 0.28, 1.0), Color(0.94, 0.67, 0.20))
+	_add_machine_box(station, Vector3(0.78, 0.20, 3.55), Vector3(0.10, 0.28, 1.0), Color(0.94, 0.67, 0.20))
+	add_child(station)
 
 func _add_box(pos: Vector3, size: Vector3, color: Color) -> void:
 	var body := StaticBody3D.new()
@@ -273,6 +324,12 @@ func _extractor_outlet(extractor: Node3D) -> Vector3:
 func _press_intake(press: Node3D) -> Vector3:
 	return press.global_position + Vector3(0, -0.72, 1.25)
 
+func _press_outlet(press: Node3D) -> Vector3:
+	return press.global_position + Vector3(0, -0.72, -1.25)
+
+func _spaceport_intake(station: Node3D) -> Vector3:
+	return station.global_position + Vector3(0, 0.15, 4.25)
+
 func _snap_conveyor_point(raw_point: Vector3, is_start: bool) -> Vector3:
 	var candidates: Array[Vector3] = []
 	for node in get_tree().get_nodes_in_group("conveyor_segments"):
@@ -281,9 +338,13 @@ func _snap_conveyor_point(raw_point: Vector3, is_start: bool) -> Vector3:
 	if is_start:
 		for node in get_tree().get_nodes_in_group("dust_extractors"):
 			candidates.append(_extractor_outlet(node))
+		for node in get_tree().get_nodes_in_group("dust_presses"):
+			candidates.append(_press_outlet(node))
 	else:
 		for node in get_tree().get_nodes_in_group("dust_presses"):
 			candidates.append(_press_intake(node))
+		for node in get_tree().get_nodes_in_group("sell_stations"):
+			candidates.append(_spaceport_intake(node))
 	var best := Vector3(round(raw_point.x), 0.0, round(raw_point.z))
 	var best_distance := 2.6
 	for candidate in candidates:
@@ -303,6 +364,8 @@ func _is_allowed_conveyor_overlap(collider: Object, start: Vector3, finish: Vect
 		return Vector2(node.global_position.x - start.x, node.global_position.z - start.z).length() < 2.8
 	if node.is_in_group("dust_presses"):
 		return Vector2(node.global_position.x - finish.x, node.global_position.z - finish.z).length() < 2.8
+	if node.is_in_group("sell_stations"):
+		return Vector2(_spaceport_intake(node).x - finish.x, _spaceport_intake(node).z - finish.z).length() < 2.8
 	return false
 
 func _find_belt_at_entry(point: Vector3, excluded: Node = null) -> Node3D:
@@ -344,10 +407,49 @@ func _spawn_dust_item(belt: Node3D, extractor: Node3D) -> void:
 	add_child(item)
 	var entry := _belt_entry(belt)
 	item.global_position = entry + Vector3(0, 0.36, 0)
-	conveyor_items.append({"visual": item, "belt": belt, "progress": 0.0})
+	conveyor_items.append({"visual": item, "belt": belt, "progress": 0.0, "item_type": "dust"})
 	flow_events.append({"time": Time.get_ticks_msec() / 1000.0, "building": extractor.get_instance_id()})
 	dust += 1
 	_update_economy_ui()
+
+func _spawn_compacted_item(belt: Node3D) -> void:
+	if not _belt_has_space(belt, 0.0):
+		return
+	var item := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.30, 0.24, 0.30)
+	item.mesh = mesh
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.34, 0.72, 0.77)
+	material.metallic = 0.30
+	material.roughness = 0.65
+	item.material_override = material
+	add_child(item)
+	item.global_position = _belt_entry(belt) + Vector3(0, 0.36, 0)
+	conveyor_items.append({"visual": item, "belt": belt, "progress": 0.0, "item_type": "compacted_dust"})
+
+func _belt_has_space(belt: Node3D, at_progress: float) -> bool:
+	if not is_instance_valid(belt):
+		return false
+	var length := float(belt.get_meta("length"))
+	for item in conveyor_items:
+		if item.get("belt") == belt and absf(float(item.get("progress", 0.0)) - at_progress) * length < ITEM_GAP_M:
+			return false
+	return true
+
+func _limit_belt_progress(belt: Node3D, item_index: int, candidate: float) -> float:
+	var length := float(belt.get_meta("length"))
+	var current := float(conveyor_items[item_index].get("progress", 0.0))
+	var allowed := candidate
+	for other_index in range(conveyor_items.size()):
+		if other_index == item_index:
+			continue
+		var other: Dictionary = conveyor_items[other_index]
+		if other.get("belt") == belt:
+			var other_progress := float(other.get("progress", 0.0))
+			if other_progress > current:
+				allowed = minf(allowed, other_progress - ITEM_GAP_M / length)
+	return maxf(current, allowed)
 
 func _find_press_at(point: Vector3) -> Node3D:
 	for node in get_tree().get_nodes_in_group("dust_presses"):
@@ -370,12 +472,13 @@ func _simulate_conveyor_factory(delta: float) -> void:
 		if remaining <= 0.0:
 			var outlet: Vector3 = extractor.global_position + Vector3(0, -0.70, -1.0)
 			var belt := _find_belt_at_entry(outlet)
-			if belt != null and conveyor_items.size() < 40:
+			if belt != null and conveyor_items.size() < 40 and _belt_has_space(belt, 0.0):
 				_spawn_dust_item(belt, extractor)
 				remaining = 2.0 / (1.0 + 0.5 * float(machine_upgrade_level))
 			else:
 				remaining = 0.25
 		extractor_timers[instance_id] = remaining
+	_flush_press_outputs()
 	for index in range(conveyor_items.size() - 1, -1, -1):
 		var item: Dictionary = conveyor_items[index]
 		var belt = item.get("belt")
@@ -387,11 +490,15 @@ func _simulate_conveyor_factory(delta: float) -> void:
 		if progress >= 1.0:
 			var exit_point := _belt_exit(belt)
 			var next_belt := _find_belt_at_entry(exit_point, belt)
-			if next_belt != null:
+			if next_belt != null and _belt_has_space(next_belt, 0.0):
 				item["belt"] = next_belt
 				progress = 0.0
 			else:
-				var receiving_press := _find_press_at(exit_point)
+				var receiving_station := _find_sell_station_at(exit_point)
+				if receiving_station != null:
+					_sell_conveyor_item(index, item)
+					continue
+				var receiving_press := _find_press_at(exit_point) if str(item.get("item_type", "dust")) == "dust" else null
 				if receiving_press != null:
 					flow_events.append({"time": Time.get_ticks_msec() / 1000.0, "building": receiving_press.get_instance_id()})
 					pressed_yield_remainder += 1.0 + 0.5 * float(machine_upgrade_level)
@@ -403,11 +510,39 @@ func _simulate_conveyor_factory(delta: float) -> void:
 					_update_economy_ui()
 					continue
 				progress = 1.0
+		progress = _limit_belt_progress(item["belt"], index, progress)
 		item["progress"] = progress
 		conveyor_items[index] = item
 		var entry := _belt_entry(item["belt"])
 		var exit := _belt_exit(item["belt"])
 		(item["visual"] as Node3D).global_position = entry.lerp(exit, progress) + Vector3(0, 0.36, 0)
+	_flush_press_outputs()
+
+func _flush_press_outputs() -> void:
+	for press in get_tree().get_nodes_in_group("dust_presses"):
+		var belt := _find_belt_at_entry(_press_outlet(press))
+		while compacted_dust > 0 and belt != null and conveyor_items.size() < 40 and _belt_has_space(belt, 0.0):
+			compacted_dust -= 1
+			_spawn_compacted_item(belt)
+	_update_economy_ui()
+
+func _find_sell_station_at(point: Vector3) -> Node3D:
+	for node in get_tree().get_nodes_in_group("sell_stations"):
+		var station := node as Node3D
+		if _spaceport_intake(station).distance_to(point) <= 2.2:
+			return station
+	return null
+
+func _sell_conveyor_item(index: int, item: Dictionary) -> void:
+	var item_type := str(item.get("item_type", "dust"))
+	var gross_price := COMPACTED_DUST_SELL_PRICE if item_type == "compacted_dust" else DUST_SELL_PRICE
+	var net_price := gross_price - int(round(float(gross_price) * SPACEPORT_FEE_RATE))
+	if item_type == "dust":
+		dust = maxi(0, dust - 1)
+	money += net_price
+	_remove_conveyor_item(index)
+	_update_economy_ui()
+	_update_status("Spaceport sold %s for %d cr after 10%% service fee." % ["compacted dust" if item_type == "compacted_dust" else "dust", net_price])
 
 func place_building(kind: String, pos: Vector3) -> void:
 	var cost := 150 if kind.begins_with("Staubf") else (250 if kind == "Staubpresse" else 500)
@@ -771,6 +906,8 @@ func interact_with_aim(camera: Camera3D) -> void:
 	var target = hit["collider"]
 	if target is Node and target.is_in_group("buildable"):
 		_open_building_ui(target)
+	elif target is Node and target.is_in_group("sell_stations"):
+		_open_building_ui(target)
 	elif target is Node3D and target.name.begins_with("OreRock"):
 		mine_rock(target)
 
@@ -830,10 +967,15 @@ func _open_building_ui(building: Node3D) -> void:
 		var connected_forward := _find_belt_at_entry(_belt_exit(building), building) != null
 		var connected_from := _find_belt_exiting_at(_belt_entry(building), building) != null
 		info = "Belt speed: %.2f m/s\nFlow: 2.4 m per segment\nConnected from previous belt: %s\nConnected to next belt: %s" % [_current_belt_speed(), "Yes" if connected_from else "No", "Yes" if connected_forward else "No"]
+	elif kind == "Spaceport":
+		info = "Cargo dock: connect a conveyor to the marked intake on the front (+Z).\nDust: %d cr each\nCompacted dust: %d cr each\nService fee: 10%%\nNet payout: dust %d cr  |  compacted dust %d cr\nItems are sold automatically when they reach the dock." % [DUST_SELL_PRICE, COMPACTED_DUST_SELL_PRICE, DUST_SELL_PRICE - int(round(DUST_SELL_PRICE * SPACEPORT_FEE_RATE)), COMPACTED_DUST_SELL_PRICE - int(round(COMPACTED_DUST_SELL_PRICE * SPACEPORT_FEE_RATE))]
 	else:
 		info = "Upgrade station\nMachine efficiency: level %d (%.1f items per dust)\nConveyor speed: %.2f m/s\nUpgrades affect all placed machines and belts." % [machine_upgrade_level, 1.0 + 0.5 * float(machine_upgrade_level), _current_belt_speed()]
 	building_info.text = info
-	building_info.text += "\nPress X to dismantle for a partial refund."
+	var can_dismantle := kind != "Spaceport"
+	if can_dismantle:
+		building_info.text += "\nPress X to dismantle for a partial refund."
+	dismantle_button.visible = can_dismantle
 	var is_upgrade_station := kind == "UpgradeStation"
 	upgrade_machine_button.visible = is_upgrade_station and machine_upgrade_level < 3
 	upgrade_belt_button.visible = is_upgrade_station and belt_upgrade_level < 3
@@ -841,7 +983,8 @@ func _open_building_ui(building: Node3D) -> void:
 		upgrade_machine_button.text = "Machine efficiency +50%%  |  %d cr" % (250 * (machine_upgrade_level + 1))
 	if upgrade_belt_button.visible:
 		upgrade_belt_button.text = "Conveyor speed +35%%  |  %d cr" % (250 * (belt_upgrade_level + 1))
-	dismantle_button.text = "Dismantle  |  X  |  Refund %d cr" % (5 if kind == "Foerderband" else (75 if kind == "Staubfoerderer" else (125 if kind == "Staubpresse" else 250)))
+	if can_dismantle:
+		dismantle_button.text = "Dismantle  |  X  |  Refund %d cr" % (5 if kind == "Foerderband" else (75 if kind == "Staubfoerderer" else (125 if kind == "Staubpresse" else 250)))
 	building_overlay.visible = true
 	get_tree().paused = true
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
