@@ -1726,23 +1726,23 @@ func _unhandled_input(event: InputEvent) -> void:
 					if splitter == null:
 						_update_status("Could not split this belt at the selected point.")
 						return
-				var branch_belt: Node3D = null
-				var branch_belts: Array[Node3D] = []
-				for index in range(segment_count):
-					var segment_pos := conveyor_start + direction * ((float(index) + 0.5) / float(segment_count))
-					var placed_belt := add_conveyor(segment_pos, belt_yaw, segment_length)
-					if index == 0:
-						branch_belt = placed_belt
-					if splitter != null and is_instance_valid(placed_belt):
-						branch_belts.append(placed_belt)
-				if splitter != null and is_instance_valid(branch_belt):
-					var output_belt_ids: Array = splitter.get_meta("output_belt_ids", [])
-					output_belt_ids.append(branch_belt.get_instance_id())
-					splitter.set_meta("output_belt_ids", output_belt_ids)
-					var branch_belt_ids: Array[int] = []
-					for branch_segment in branch_belts:
-						branch_belt_ids.append(branch_segment.get_instance_id())
-					splitter.set_meta("branch_belt_ids", branch_belt_ids)
+					var branch_belt: Node3D = null
+					var branch_belts: Array[Node3D] = []
+					for index in range(segment_count):
+						var segment_pos := conveyor_start + direction * ((float(index) + 0.5) / float(segment_count))
+						var placed_belt := add_conveyor(segment_pos, belt_yaw, segment_length)
+						if index == 0:
+							branch_belt = placed_belt
+						if is_instance_valid(placed_belt):
+							branch_belts.append(placed_belt)
+					if is_instance_valid(branch_belt):
+						var output_belt_ids: Array = splitter.get_meta("output_belt_ids", [])
+						output_belt_ids.append(branch_belt.get_instance_id())
+						splitter.set_meta("output_belt_ids", output_belt_ids)
+						var branch_belt_ids: Array[int] = []
+						for branch_segment in branch_belts:
+							branch_belt_ids.append(branch_segment.get_instance_id())
+						splitter.set_meta("branch_belt_ids", branch_belt_ids)
 				else:
 					var route := _build_conveyor_route(conveyor_start, preview_endpoint, conveyor_start_direction, _direction_for_conveyor_end(preview_endpoint))
 					if not _place_conveyor_route(route):
